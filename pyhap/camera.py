@@ -334,6 +334,13 @@ RTP_STREAMING_CONTROL_STATUS = {
 #: Version string for the Camera Capabilities / Camera Motion Zones services.
 CAMERA_CAPABILITIES_SERVICE_VERSION = "17.99"
 
+#: HAP TLV8 list separator: a zero-length TLV of type 0. Items of a repeated
+#: TLV list are encoded as a single field whose value is the item sub-TLVs
+#: joined by this separator (controllers overwrite duplicate top-level types and
+#: split lists on type 0, so emitting one TLV per item would drop all but the
+#: last item).
+TLV_SEPARATOR = b"\x00\x00"
+
 
 FFMPEG_CMD = (
     "ffmpeg -re -f avfoundation -framerate {fps} -i 0:0 -threads 0 "
@@ -512,9 +519,8 @@ class Camera(Accessory):
         The codec is read from the first tier's ``codec`` (H264/H265, default H265).
         """
         codec = video_tiers[0].get("codec", "H265")
-        tiers_tlv = b""
-        for tier in video_tiers:
-            tier_tlv = tlv.encode(
+        tier_items = [
+            tlv.encode(
                 VIDEO_STREAM_TIER_TYPES["IDENTIFIER"],
                 struct.pack("<I", tier["id"]),
                 VIDEO_STREAM_TIER_TYPES["QUALITY"],
@@ -528,15 +534,17 @@ class Camera(Accessory):
                 VIDEO_STREAM_TIER_TYPES["FRAME_RATE"],
                 struct.pack("<B", tier["fps"]),
             )
-            tiers_tlv += tlv.encode(SUPPORTED_VIDEO_STREAM_TIERS_TYPES["TIERS"], tier_tlv)
-
-        header = tlv.encode(
+            for tier in video_tiers
+        ]
+        value = tlv.encode(
             SUPPORTED_VIDEO_STREAM_TIERS_TYPES["CODEC"],
             TIER_VIDEO_CODEC_TYPES[codec],
             SUPPORTED_VIDEO_STREAM_TIERS_TYPES["PAYLOAD_TYPE"],
             struct.pack("<B", payload_type),
+            SUPPORTED_VIDEO_STREAM_TIERS_TYPES["TIERS"],
+            TLV_SEPARATOR.join(tier_items),
         )
-        return to_base64_str(header + tiers_tlv)
+        return to_base64_str(value)
 
     @staticmethod
     def get_supported_audio_stream_tiers(audio_tiers, payload_type=110):
@@ -547,9 +555,8 @@ class Camera(Accessory):
         ``sample_rate`` (kHz: 16/24/32/48), ``bit_depth`` (8/16/24), ``packet_time``
         (ms, must be 20) and ``channels`` (must be 1).
         """
-        tiers_tlv = b""
-        for tier in audio_tiers:
-            tier_tlv = tlv.encode(
+        tier_items = [
+            tlv.encode(
                 AUDIO_STREAM_TIER_TYPES["IDENTIFIER"],
                 struct.pack("<I", tier["id"]),
                 AUDIO_STREAM_TIER_TYPES["TARGET_AVERAGE_BITRATE"],
@@ -563,15 +570,17 @@ class Camera(Accessory):
                 AUDIO_STREAM_TIER_TYPES["NUMBER_OF_CHANNELS"],
                 struct.pack("<B", tier.get("channels", 1)),
             )
-            tiers_tlv += tlv.encode(SUPPORTED_AUDIO_STREAM_TIERS_TYPES["TIERS"], tier_tlv)
-
-        header = tlv.encode(
+            for tier in audio_tiers
+        ]
+        value = tlv.encode(
             SUPPORTED_AUDIO_STREAM_TIERS_TYPES["CODEC"],
             TIER_AUDIO_CODEC_OPUS,
             SUPPORTED_AUDIO_STREAM_TIERS_TYPES["PAYLOAD_TYPE"],
             struct.pack("<B", payload_type),
+            SUPPORTED_AUDIO_STREAM_TIERS_TYPES["TIERS"],
+            TLV_SEPARATOR.join(tier_items),
         )
-        return to_base64_str(header + tiers_tlv)
+        return to_base64_str(value)
 
     @staticmethod
     def get_camera_capabilities(sensors):
@@ -582,7 +591,7 @@ class Camera(Accessory):
         a list of dicts (``id`` 16 raw bytes, ``quality``, ``width``, ``height``,
         ``fps``, ``avg_bitrate`` kbps, ``peak_bitrate`` kbps).
         """
-        sensor_tlvs = b""
+        sensor_items = []
         for sensor in sensors:
             dims = tlv.encode(
                 SENSOR_DIMENSIONS_TYPES["WIDTH"],
@@ -590,9 +599,8 @@ class Camera(Accessory):
                 SENSOR_DIMENSIONS_TYPES["HEIGHT"],
                 struct.pack("<H", sensor["height"]),
             )
-            caps_tlv = b""
-            for cap in sensor["video_caps"]:
-                cap_tlv = tlv.encode(
+            cap_items = [
+                tlv.encode(
                     VIDEO_STREAM_CAPABILITIES_TYPES["IDENTIFIER"],
                     cap["id"],
                     VIDEO_STREAM_CAPABILITIES_TYPES["VIDEO_QUALITY"],
@@ -608,27 +616,31 @@ class Camera(Accessory):
                     VIDEO_STREAM_CAPABILITIES_TYPES["PEAK_BIT_RATE"],
                     struct.pack("<I", cap["peak_bitrate"]),
                 )
-                caps_tlv += tlv.encode(
-                    SENSOR_CONFIG_TYPES["VIDEO_STREAM_CAPABILITIES"], cap_tlv
+                for cap in sensor["video_caps"]
+            ]
+            sensor_items.append(
+                tlv.encode(
+                    SENSOR_CONFIG_TYPES["SENSOR_DIMENSIONS"],
+                    dims,
+                    SENSOR_CONFIG_TYPES["SENSOR_UUID"],
+                    sensor["uuid"],
+                    SENSOR_CONFIG_TYPES["SENSOR_TYPE"],
+                    SENSOR_TYPE["PRIMARY"],
+                    SENSOR_CONFIG_TYPES["SENSOR_INTENT"],
+                    SENSOR_INTENT["MAIN"],
+                    SENSOR_CONFIG_TYPES["VIDEO_STREAM_CAPABILITIES"],
+                    TLV_SEPARATOR.join(cap_items),
                 )
+            )
 
-            sensor_cfg = tlv.encode(
-                SENSOR_CONFIG_TYPES["SENSOR_DIMENSIONS"],
-                dims,
-                SENSOR_CONFIG_TYPES["SENSOR_UUID"],
-                sensor["uuid"],
-                SENSOR_CONFIG_TYPES["SENSOR_TYPE"],
-                SENSOR_TYPE["PRIMARY"],
-                SENSOR_CONFIG_TYPES["SENSOR_INTENT"],
-                SENSOR_INTENT["MAIN"],
-            ) + caps_tlv
-            sensor_tlvs += tlv.encode(CAMERA_SENSORS_TYPES["CAMERA_SENSORS"], sensor_cfg)
-
+        camera_sensors = tlv.encode(
+            CAMERA_SENSORS_TYPES["CAMERA_SENSORS"], TLV_SEPARATOR.join(sensor_items)
+        )
         value = tlv.encode(
             CAMERA_CAPABILITIES_TYPES["VERSION"],
             struct.pack("<B", 1),
             CAMERA_CAPABILITIES_TYPES["CAMERA_SENSORS"],
-            sensor_tlvs,
+            camera_sensors,
         )
         return to_base64_str(value)
 
@@ -703,16 +715,18 @@ class Camera(Accessory):
         self._streaming_status = []
         self._management = []
         self._multi_tier = bool(options.get("video_tiers"))
+        self._multi_tier_idx = None
+        # The legacy CameraRTPStreamManagement service and the new HKSV multi-tier
+        # service can coexist on one accessory (legacy H.264 as the baseline that
+        # iOS recognises, plus the new HEVC tiers as an enhancement). Set up
+        # whichever the options describe.
+        if options.get("video"):
+            self._setup_stream_management(options)
         if self._multi_tier:
-            # New HomeKit Secure Video multi-tier streaming model (spec v1.0).
-            # Mutually exclusive with the legacy CameraRTPStreamManagement service
-            # to avoid advertising two conflicting stream-management services.
             self._video_tiers = {t["id"]: t for t in options["video_tiers"]}
             self._audio_tiers = {t["id"]: t for t in options.get("audio_tiers", [])}
             self._status_active_char = None
             self._setup_multi_tier_management(options)
-        else:
-            self._setup_stream_management(options)
 
     @property
     def streaming_status(self):
@@ -764,6 +778,8 @@ class Camera(Accessory):
     def _setup_multi_tier_management(self, options):
         """Create the Camera Capabilities, Global Operating Mode and Multi-Tier
         RTP Stream Management services (spec 3.1, 3.2, 3.6)."""
+        stream_idx = len(self._management)
+        self._multi_tier_idx = stream_idx
         sensors = options.get("sensors") or self._default_sensors(options)
 
         capabilities = self.add_preload_service("CameraCapabilities", chars=["Version"])
@@ -799,7 +815,9 @@ class Camera(Accessory):
         )
         management.configure_char(
             "SetupEndpoints",
-            setter_callback=lambda value: self.set_endpoints(value, stream_idx=0),
+            setter_callback=lambda value: self.set_endpoints(
+                value, stream_idx=stream_idx
+            ),
         )
         management.configure_char(
             "RTPStreamingControl",
@@ -843,6 +861,7 @@ class Camera(Accessory):
         Setup Endpoints) and a video/audio tier identifier. The same characteristic
         is then read back for the command status (Write Response).
         """
+        logger.info("==> iOS WROTE RTP Streaming Control (multi-tier/HEVC path)")
         objs = tlv.decode(value, from_base64=True)
         session_id_bytes = objs.get(RTP_STREAMING_CONTROL_TYPES["SESSION_IDENTIFIER"])
         command = objs.get(RTP_STREAMING_CONTROL_TYPES["COMMAND"])
@@ -883,7 +902,9 @@ class Camera(Accessory):
             status,
             to_base64=True,
         )
-        self._management[0].get_characteristic("RTPStreamingControl").set_value(response)
+        self._management[self._multi_tier_idx].get_characteristic(
+            "RTPStreamingControl"
+        ).set_value(response)
 
     def _start_tier_stream(self, session_info, objs, tier):
         """Resolve a tier to encoder parameters and start the stream."""
@@ -1114,6 +1135,7 @@ class Camera(Accessory):
         :param value: base64-encoded selected configuration in TLV format
         :type value: ``str``
         """
+        logger.info("==> iOS WROTE SelectedRTPStreamConfiguration (legacy H.264 path)")
         logger.debug("set_selected_stream_config - value - %s", value)
 
         objs = tlv.decode(value, from_base64=True)
@@ -1140,7 +1162,7 @@ class Camera(Accessory):
     def set_streaming_available(self, stream_idx):
         """Send an update to the controller that streaming is available."""
         self._streaming_status[stream_idx] = STREAMING_STATUS["AVAILABLE"]
-        if self._multi_tier:
+        if stream_idx == self._multi_tier_idx:
             # The multi-tier service has no StreamingStatus characteristic; the
             # controller learns about teardown through the RTP session itself.
             return
