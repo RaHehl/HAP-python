@@ -586,5 +586,44 @@
          "NFCAccessSupportedConfiguration"
       ],
       "UUID": "00000266-0000-1000-8000-0026BB765291"
+   },
+   "CameraCapabilities": {
+      "OptionalCharacteristics": [
+         "ManuallyDisabled"
+      ],
+      "RequiredCharacteristics": [
+         "Version",
+         "CameraCapabilities"
+      ],
+      "UUID": "00008010-0000-1000-8000-0026BB765291"
+   },
+   "CameraGlobalOperatingMode": {
+      "OptionalCharacteristics": [
+         "ManuallyDisabled",
+         "NightVision",
+         "ThirdPartyCameraActive"
+      ],
+      "RequiredCharacteristics": [
+         "HomeKitCameraActive",
+         "StreamingEnabled",
+         "CameraOperatingModeIndicator"
+      ],
+      "UUID": "00008032-0000-1000-8000-0026BB765291"
+   },
+   "CameraMultiTierRTPStreamManagement": {
+      "OptionalCharacteristics": [
+         "SensorUUID",
+         "Name"
+      ],
+      "RequiredCharacteristics": [
+         "StreamingEnabled",
+         "StatusActive",
+         "SupportedVideoStreamTiers",
+         "SupportedAudioStreamTiers",
+         "SupportedRTPConfiguration",
+         "SetupEndpoints",
+         "RTPStreamingControl"
+      ],
+      "UUID": "00008031-0000-1000-8000-0026BB765291"
    }
 }

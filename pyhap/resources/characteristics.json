@@ -1695,5 +1695,88 @@
          "pr"
       ],
       "UUID": "00000265-0000-1000-8000-0026BB765291"
+   },
+   "HomeKitCameraActive": {
+      "Format": "bool",
+      "Permissions": [
+         "pr",
+         "pw",
+         "ev"
+      ],
+      "UUID": "0000021B-0000-1000-8000-0026BB765291"
+   },
+   "CameraOperatingModeIndicator": {
+      "Format": "bool",
+      "Permissions": [
+         "pr",
+         "pw",
+         "ev"
+      ],
+      "UUID": "0000021D-0000-1000-8000-0026BB765291"
+   },
+   "ManuallyDisabled": {
+      "Format": "bool",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00000227-0000-1000-8000-0026BB765291"
+   },
+   "ThirdPartyCameraActive": {
+      "Format": "bool",
+      "Permissions": [
+         "pr",
+         "pw",
+         "ev"
+      ],
+      "UUID": "0000021C-0000-1000-8000-0026BB765291"
+   },
+   "StreamingEnabled": {
+      "Format": "bool",
+      "Permissions": [
+         "pr",
+         "pw",
+         "ev"
+      ],
+      "UUID": "00008041-0000-1000-8000-0026BB765291"
+   },
+   "SensorUUID": {
+      "Format": "data",
+      "Permissions": [
+         "pr"
+      ],
+      "UUID": "0000805B-0000-1000-8000-0026BB765291"
+   },
+   "CameraCapabilities": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr"
+      ],
+      "UUID": "00008011-0000-1000-8000-0026BB765291"
+   },
+   "SupportedVideoStreamTiers": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00008043-0000-1000-8000-0026BB765291"
+   },
+   "SupportedAudioStreamTiers": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00008044-0000-1000-8000-0026BB765291"
+   },
+   "RTPStreamingControl": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "wr"
+      ],
+      "UUID": "00008045-0000-1000-8000-0026BB765291"
    }
 }
