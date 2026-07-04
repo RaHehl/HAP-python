@@ -21,18 +21,18 @@ import logging
 from typing import Awaitable, Callable, Dict, Optional, Tuple
 
 from pyhap import hds
-from pyhap.hds_protocol import EVENT, REQUEST, RESPONSE, Message
+from pyhap.hds_protocol import EVENT, HDSStatus, REQUEST, RESPONSE, Message
 
 logger = logging.getLogger("pyhap.hds")
 
-RequestHandler = Callable[[Message], Tuple[int, dict]]
+RequestHandler = Callable[[Message], Tuple[int, dict]]  # returns (HDSStatus, body)
 EventHandler = Callable[[Message], None]
 
 
 @dataclass
 class _PendingTransport:
-    read_key: bytes
-    write_key: bytes
+    encrypt_key: bytes
+    decrypt_key: bytes
 
 
 class HDSConnection(asyncio.Protocol):
@@ -49,7 +49,9 @@ class HDSConnection(asyncio.Protocol):
         self._next_request_id = 1
         self.on_close: Optional[Callable[["HDSConnection"], None]] = None
         # The mandatory control handshake is answered by default.
-        self.add_request_handler("control", "hello", lambda message: (0, {}))
+        self.add_request_handler(
+            "control", "hello", lambda message: (HDSStatus.SUCCESS, {})
+        )
 
     # --- registration API ---
 
@@ -113,7 +115,7 @@ class HDSConnection(asyncio.Protocol):
         if len(self._buffer) < 4:
             return False
         for pending in list(self._listener._pending):
-            trial = hds.HDSCrypto(pending.read_key, pending.write_key)
+            trial = hds.HDSCrypto(pending.encrypt_key, pending.decrypt_key)
             probe = bytearray(self._buffer)
             try:
                 payload = trial.decrypt_frame(probe)
@@ -162,7 +164,7 @@ class HDSConnection(asyncio.Protocol):
     def _handle_request(self, message: Message) -> None:
         handler = self._request_handlers.get((message.protocol, message.topic))
         if handler is None:
-            status, response_message = 2, {}  # unsupported
+            status, response_message = HDSStatus.PROTOCOL_SPECIFIC_ERROR, {}
         else:
             status, response_message = handler(message)
         self._send(
@@ -217,10 +219,10 @@ class HDSListener:
         returned accessory key salt goes into the setup response.
         """
         accessory_key_salt = hds.new_key_salt()
-        read_key, write_key = hds.derive_keys(
+        encrypt_key, decrypt_key = hds.derive_keys(
             shared_secret, controller_key_salt, accessory_key_salt
         )
-        self._pending.append(_PendingTransport(read_key, write_key))
+        self._pending.append(_PendingTransport(encrypt_key, decrypt_key))
         return accessory_key_salt
 
     async def stop(self) -> None:

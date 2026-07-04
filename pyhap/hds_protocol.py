@@ -14,8 +14,29 @@ controllers.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import IntEnum
 import struct
 from typing import Any, Optional, Tuple
+
+
+class HDSStatus(IntEnum):
+    """Header status of an HDS response message."""
+
+    SUCCESS = 0
+    OUT_OF_MEMORY = 1
+    TIMEOUT = 2
+    HEADER_ERROR = 3
+    PAYLOAD_ERROR = 4
+    MISSING_PROTOCOL = 5
+    PROTOCOL_SPECIFIC_ERROR = 6
+
+
+class Int64(int):
+    """An integer that always serializes as a 64-bit HDS value.
+
+    The message header ``id`` and ``status`` are wire-encoded as 64-bit integers
+    regardless of magnitude; wrapping them keeps that exact-width encoding.
+    """
 
 # --- payload format tags ---
 
@@ -55,6 +76,8 @@ _DICT_TERMINATED = 0xEF
 
 
 def _encode_int(value: int) -> bytes:
+    if isinstance(value, Int64):
+        return bytes([_INT64]) + struct.pack("<q", value)
     if value == -1:
         return bytes([_INT_MINUS_ONE])
     if 0 <= value <= 38:
@@ -219,9 +242,9 @@ class Message:
         """
         header: dict = {"protocol": self.protocol, self.kind: self.topic}
         if self.id is not None:
-            header["id"] = self.id
+            header["id"] = Int64(self.id)
         if self.status is not None:
-            header["status"] = self.status
+            header["status"] = Int64(self.status)
         header_bytes = encode(header)
         if len(header_bytes) > 0xFF:
             raise ValueError("HDS message header too large")

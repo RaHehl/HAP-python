@@ -661,7 +661,8 @@ def test_setter_receives_client_addr():
     from pyhap.characteristic import _setter_wants_client_addr
 
     assert _setter_wants_client_addr(lambda value: None) is False
-    assert _setter_wants_client_addr(lambda value, addr: None) is True
+    assert _setter_wants_client_addr(lambda value, sender_client_addr: None) is True
+    assert _setter_wants_client_addr(lambda value, addr: None) is False
     assert _setter_wants_client_addr(lambda *args: None) is False
 
 

@@ -50,9 +50,12 @@ SETUP_STATUS_GENERIC_ERROR = b"\x01"
 SETUP_STATUS_BUSY = b"\x02"
 
 # HDS derives its two directional keys from the HAP session shared secret salted
-# with both key salts; the info strings pick the direction.
-_KEY_SALT_INFO_READ = b"HDS-Read-Encryption-Key"
-_KEY_SALT_INFO_WRITE = b"HDS-Write-Encryption-Key"
+# with both key salts. The info strings are named from the controller's point of
+# view: the controller READS (decrypts) what the accessory encrypts, so the
+# accessory encrypts outgoing frames with the "Read" key and decrypts incoming
+# frames with the "Write" key.
+_KEY_INFO_ACCESSORY_ENCRYPT = b"HDS-Read-Encryption-Key"
+_KEY_INFO_ACCESSORY_DECRYPT = b"HDS-Write-Encryption-Key"
 
 _NONCE_LENGTH = 12
 _TAG_LENGTH = 16
@@ -105,16 +108,16 @@ def encode_setup_response(
 
 
 def derive_keys(shared_secret, controller_key_salt, accessory_key_salt):
-    """Derive the (read, write) HDS keys from the HAP session shared secret.
+    """Derive the (encrypt, decrypt) HDS keys from the HAP session shared secret.
 
-    ``read`` decrypts controller->accessory frames; ``write`` encrypts
-    accessory->controller frames. The salt is the concatenation of the two key
+    ``encrypt`` seals accessory->controller frames; ``decrypt`` opens
+    controller->accessory frames. The salt is the concatenation of the two key
     salts, matching the controller's derivation.
     """
     salt = controller_key_salt + accessory_key_salt
-    read_key = hap_hkdf(shared_secret, salt, _KEY_SALT_INFO_READ)
-    write_key = hap_hkdf(shared_secret, salt, _KEY_SALT_INFO_WRITE)
-    return read_key, write_key
+    encrypt_key = hap_hkdf(shared_secret, salt, _KEY_INFO_ACCESSORY_ENCRYPT)
+    decrypt_key = hap_hkdf(shared_secret, salt, _KEY_INFO_ACCESSORY_DECRYPT)
+    return encrypt_key, decrypt_key
 
 
 def new_key_salt() -> bytes:
@@ -123,33 +126,33 @@ def new_key_salt() -> bytes:
 
 
 def _nonce(counter: int) -> bytes:
-    # 96-bit nonce: 64-bit little-endian counter at offset 0, then four zero
-    # bytes (HDS convention, distinct from the right-justified HAP control nonce).
-    return struct.pack("<Q", counter) + b"\x00\x00\x00\x00"
+    # 96-bit nonce: four zero bytes then the 64-bit little-endian counter
+    # (right-justified), the same layout the HAP control channel uses.
+    return b"\x00\x00\x00\x00" + struct.pack("<Q", counter)
 
 
 class HDSCrypto:
     """Frame encryption/decryption for one HDS transport.
 
-    Each 4-byte frame header (a 1-byte type followed by a 24-bit little-endian
+    Each 4-byte frame header (a 1-byte type followed by a 24-bit big-endian
     payload length) is authenticated as additional data over an encrypted
     payload, with a per-direction monotonically increasing nonce counter.
     """
 
-    def __init__(self, read_key: bytes, write_key: bytes) -> None:
-        self._read_cipher = ChaCha20Poly1305(read_key)
-        self._write_cipher = ChaCha20Poly1305(write_key)
-        self._read_count = 0
-        self._write_count = 0
+    def __init__(self, encrypt_key: bytes, decrypt_key: bytes) -> None:
+        self._encrypt_cipher = ChaCha20Poly1305(encrypt_key)
+        self._decrypt_cipher = ChaCha20Poly1305(decrypt_key)
+        self._encrypt_count = 0
+        self._decrypt_count = 0
 
     def encrypt_frame(self, payload: bytes, frame_type: int = 1) -> bytes:
         """Encrypt a payload into a full HDS frame (header + ciphertext + tag)."""
         if len(payload) > _MAX_PAYLOAD_LENGTH:
             raise ValueError("HDS payload too large for a single frame")
         header = bytes([frame_type]) + len(payload).to_bytes(3, "big")
-        nonce = _nonce(self._write_count)
-        self._write_count += 1
-        ciphertext = self._write_cipher.encrypt(nonce, payload, header)
+        nonce = _nonce(self._encrypt_count)
+        self._encrypt_count += 1
+        ciphertext = self._encrypt_cipher.encrypt(nonce, payload, header)
         return header + ciphertext
 
     def decrypt_frame(self, buffer: bytearray) -> Optional[bytes]:
@@ -167,9 +170,9 @@ class HDSCrypto:
         if len(buffer) < frame_length:
             return None
         ciphertext = bytes(buffer[_FRAME_HEADER_LENGTH:frame_length])
-        nonce = _nonce(self._read_count)
-        plaintext = self._read_cipher.decrypt(nonce, ciphertext, header)
-        self._read_count += 1
+        nonce = _nonce(self._decrypt_count)
+        plaintext = self._decrypt_cipher.decrypt(nonce, ciphertext, header)
+        self._decrypt_count += 1
         del buffer[:frame_length]
         return plaintext
 

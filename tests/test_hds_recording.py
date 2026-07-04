@@ -6,7 +6,7 @@ import os
 import pytest
 
 from pyhap import hds, hds_recording, hds_server
-from pyhap.hds_protocol import EVENT, REQUEST, RESPONSE, Message
+from pyhap.hds_protocol import EVENT, HDSStatus, REQUEST, RESPONSE, Message
 
 
 def _paired(listener):
@@ -84,7 +84,7 @@ async def test_recording_stream_open_and_fragments():
     # First message is the open response, then three data events.
     assert messages[0].kind == RESPONSE
     assert messages[0].topic == "open"
-    assert messages[0].status == hds_recording.RecordingReason.NORMAL
+    assert messages[0].status == HDSStatus.SUCCESS
 
     data_events = [m for m in messages if m.kind == EVENT and m.topic == "data"]
     assert len(data_events) == 3
@@ -158,7 +158,8 @@ async def test_recording_open_rejects_wrong_type():
     )
     await asyncio.sleep(0.02)
     response = _drain_events(controller, transport)[0]
-    assert response.status == hds_recording.RecordingReason.UNEXPECTED_FAILURE
+    assert response.status == HDSStatus.PROTOCOL_SPECIFIC_ERROR
+    assert response.message["status"] == hds_recording.RecordingReason.UNEXPECTED_FAILURE
 
 
 @pytest.mark.asyncio
@@ -203,6 +204,6 @@ async def test_recording_close_stops_stream():
     await asyncio.sleep(0.02)
     messages = _drain_events(controller, transport)
     assert messages[0].topic == "close"
-    assert messages[0].status == hds_recording.RecordingReason.NORMAL
+    assert messages[0].status == HDSStatus.SUCCESS
     # The blocked "never" fragment was never sent.
     assert not [m for m in messages if m.kind == EVENT]

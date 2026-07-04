@@ -6,7 +6,7 @@ import os
 import pytest
 
 from pyhap import hds, hds_server
-from pyhap.hds_protocol import EVENT, REQUEST, RESPONSE, Message
+from pyhap.hds_protocol import EVENT, HDSStatus, REQUEST, RESPONSE, Message
 
 
 class _CaptureTransport(asyncio.Transport):
@@ -84,7 +84,7 @@ def test_unknown_request_returns_unsupported(listener):
 
     _feed(connection, controller, Message("dataSend", REQUEST, "mystery", {}, id=2))
     response = _read(controller, transport)
-    assert response.status == 2
+    assert response.status == HDSStatus.PROTOCOL_SPECIFIC_ERROR
 
 
 def test_custom_request_handler(listener):

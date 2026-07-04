@@ -21,7 +21,7 @@ from enum import IntEnum
 import logging
 from typing import AsyncIterator, Callable, Optional
 
-from pyhap.hds_protocol import Message
+from pyhap.hds_protocol import HDSStatus, Message
 
 logger = logging.getLogger("pyhap.hds")
 
@@ -41,11 +41,12 @@ class RecordingReason(IntEnum):
     NOT_ALLOWED = 1
     BUSY = 2
     CANCELLED = 3
-    UNEXPECTED_FAILURE = 4
-    TIMEOUT = 5
-    BAD_DATA = 6
-    PROTOCOL_ERROR = 7
-    INVALID_CONFIGURATION = 8
+    UNSUPPORTED = 4
+    UNEXPECTED_FAILURE = 5
+    TIMEOUT = 6
+    BAD_DATA = 7
+    PROTOCOL_ERROR = 8
+    INVALID_CONFIGURATION = 9
 
 
 @dataclass
@@ -80,26 +81,32 @@ class RecordingStreamManager:
         connection.add_request_handler(_DATA_SEND, "close", self._handle_close)
         connection.add_request_handler(_DATA_SEND, "ack", self._handle_ack)
 
+    @staticmethod
+    def _reject(reason: RecordingReason):
+        # A rejected request carries HDSStatus.PROTOCOL_SPECIFIC_ERROR in the
+        # header and the specific reason in the message body.
+        return HDSStatus.PROTOCOL_SPECIFIC_ERROR, {"status": reason}
+
     def _handle_open(self, message: Message):
         body = message.message
         if (
             body.get("target") != _TARGET_CONTROLLER
             or body.get("type") != _TYPE_RECORDING
         ):
-            return RecordingReason.UNEXPECTED_FAILURE, {}
+            return self._reject(RecordingReason.UNEXPECTED_FAILURE)
         if self._task is not None and not self._task.done():
-            return RecordingReason.BUSY, {}
+            return self._reject(RecordingReason.BUSY)
         self._stream_id = body["streamId"]
         self._closed = False
         self._task = asyncio.get_event_loop().create_task(self._stream())
-        return RecordingReason.NORMAL, {}
+        return HDSStatus.SUCCESS, {}
 
     def _handle_close(self, message: Message):
         self._stop()
-        return RecordingReason.NORMAL, {}
+        return HDSStatus.SUCCESS, {}
 
     def _handle_ack(self, message: Message):
-        return RecordingReason.NORMAL, {}
+        return HDSStatus.SUCCESS, {}
 
     def _stop(self) -> None:
         self._closed = True

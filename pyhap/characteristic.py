@@ -33,24 +33,17 @@ logger = logging.getLogger(__name__)
 def _setter_wants_client_addr(setter: Callable) -> bool:
     """Whether ``setter`` opts in to receiving the sender's client address.
 
-    A setter may declare a second explicit positional parameter to receive
+    A setter opts in by declaring a parameter literally named
     ``sender_client_addr`` (used e.g. for HDS transport setup that needs the HAP
-    session). Plain one-argument setters - and mocks with ``*args`` - are called
-    unchanged.
+    session). Every other setter - including the common two-argument
+    default-value closures ``lambda value, option=option: ...`` - is called with
+    the value alone, unchanged.
     """
     try:
-        positional = [
-            parameter
-            for parameter in inspect.signature(setter).parameters.values()
-            if parameter.kind
-            in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            )
-        ]
+        parameters = inspect.signature(setter).parameters
     except (TypeError, ValueError):
         return False
-    return len(positional) >= 2
+    return "sender_client_addr" in parameters
 
 # ### HAP Format ###
 HAP_FORMAT_BOOL = "bool"
