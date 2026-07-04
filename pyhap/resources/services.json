@@ -688,5 +688,14 @@
          "CameraClientCertificateStatus"
       ],
       "UUID": "00008080-0000-1000-8000-0026BB765291"
+   },
+   "DataStreamTransportManagement": {
+      "OptionalCharacteristics": [],
+      "RequiredCharacteristics": [
+         "SetupDataStreamTransport",
+         "SupportedDataStreamTransportConfiguration",
+         "Version"
+      ],
+      "UUID": "00000129-0000-1000-8000-0026BB765291"
    }
 }

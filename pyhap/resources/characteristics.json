@@ -1964,5 +1964,21 @@
          "ev"
       ],
       "UUID": "00008083-0000-1000-8000-0026BB765291"
+   },
+   "SetupDataStreamTransport": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "wr"
+      ],
+      "UUID": "00000131-0000-1000-8000-0026BB765291"
+   },
+   "SupportedDataStreamTransportConfiguration": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr"
+      ],
+      "UUID": "00000130-0000-1000-8000-0026BB765291"
    }
 }
