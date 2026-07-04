@@ -654,3 +654,101 @@ def test_selected_recording_configuration_hook(multi_tier_camera):
     camera.set_selected_recording_configuration(to_base64_str(selected.encode()))
     assert selected_seen == [selected]
     assert camera.selected_recording_configuration == selected
+
+
+def test_setter_receives_client_addr():
+    """A two-arg setter opts in to the sender's client address."""
+    from pyhap.characteristic import _setter_wants_client_addr
+
+    assert _setter_wants_client_addr(lambda value: None) is False
+    assert _setter_wants_client_addr(lambda value, addr: None) is True
+    assert _setter_wants_client_addr(lambda *args: None) is False
+
+
+@pytest.fixture(name="recording_camera")
+def recording_camera_fixture():
+    with patch(
+        "pyhap.accessory_driver.AccessoryDriver.persist"
+    ), patch("pyhap.accessory_driver.AccessoryDriver.load"):
+        driver = AccessoryDriver(loop=MagicMock(), listen_address="127.0.0.1")
+        options = {
+            "video": {
+                "codec": {
+                    "profiles": [
+                        camera_module.VIDEO_CODEC_PARAM_PROFILE_ID_TYPES["BASELINE"]
+                    ],
+                    "levels": [camera_module.VIDEO_CODEC_PARAM_LEVEL_TYPES["TYPE3_1"]],
+                },
+                "resolutions": [[640, 360, 15]],
+            },
+            "audio": {"codecs": [{"type": "OPUS", "samplerate": 24}]},
+            "srtp": True,
+            "address": "127.0.0.1",
+            "video_tiers": VIDEO_TIERS,
+        }
+        camera = Camera(options, driver, "Cam")
+        camera.driver = driver
+        return camera
+
+
+def test_data_stream_transport_service_present(recording_camera):
+    service = recording_camera.get_service("DataStreamTransportManagement")
+    assert service.get_characteristic("Version").get_value() == "1.0"
+    assert (
+        service.get_characteristic(
+            "SupportedDataStreamTransportConfiguration"
+        ).get_value()
+        is not None
+    )
+
+
+def test_setup_data_stream_transport_without_session_errors(recording_camera):
+    from pyhap import hds
+    from pyhap.util import base64_to_bytes
+
+    camera = recording_camera
+    # No session key for this client, and no listener started.
+    setup = hds.encode_setup_response  # noqa: F841
+    request = hds.tlv.encode(
+        hds.SETUP_TYPES["CONTROLLER_KEY_SALT"], b"\x11" * 32
+    )
+    camera.set_data_stream_transport(
+        to_base64_str(request), sender_client_addr=("10.0.0.9", 5000)
+    )
+    value = (
+        camera.get_service("DataStreamTransportManagement")
+        .get_characteristic("SetupDataStreamTransport")
+        .get_value()
+    )
+    objs = hds.tlv.decode(base64_to_bytes(value))
+    assert objs[hds.SETUP_RESPONSE_TYPES["STATUS"]] == hds.SETUP_STATUS_GENERIC_ERROR
+
+
+@pytest.mark.asyncio
+async def test_setup_data_stream_transport_with_session(recording_camera):
+    import os
+
+    from pyhap import hds
+    from pyhap.util import base64_to_bytes
+
+    camera = recording_camera
+    await camera._ensure_hds_listener()
+    try:
+        client = ("10.0.0.9", 5000)
+        camera.driver.session_shared_keys[client] = os.urandom(32)
+        request = hds.tlv.encode(
+            hds.SETUP_TYPES["CONTROLLER_KEY_SALT"], os.urandom(32)
+        )
+        camera.set_data_stream_transport(
+            to_base64_str(request), sender_client_addr=client
+        )
+        value = (
+            camera.get_service("DataStreamTransportManagement")
+            .get_characteristic("SetupDataStreamTransport")
+            .get_value()
+        )
+        objs = hds.tlv.decode(base64_to_bytes(value))
+        assert objs[hds.SETUP_RESPONSE_TYPES["STATUS"]] == hds.SETUP_STATUS_SUCCESS
+        assert objs[hds.SETUP_RESPONSE_TYPES["ACCESSORY_KEY_SALT"]]
+    finally:
+        await camera.stop()

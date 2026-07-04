@@ -5,6 +5,7 @@ A Characteristic is the smallest unit of the smart home, e.g.
 a temperature measuring or a device status.
 """
 
+import inspect
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 from uuid import UUID
@@ -27,6 +28,29 @@ if TYPE_CHECKING:
     from .service import Service
 
 logger = logging.getLogger(__name__)
+
+
+def _setter_wants_client_addr(setter: Callable) -> bool:
+    """Whether ``setter`` opts in to receiving the sender's client address.
+
+    A setter may declare a second explicit positional parameter to receive
+    ``sender_client_addr`` (used e.g. for HDS transport setup that needs the HAP
+    session). Plain one-argument setters - and mocks with ``*args`` - are called
+    unchanged.
+    """
+    try:
+        positional = [
+            parameter
+            for parameter in inspect.signature(setter).parameters.values()
+            if parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+    except (TypeError, ValueError):
+        return False
+    return len(positional) >= 2
 
 # ### HAP Format ###
 HAP_FORMAT_BOOL = "bool"
@@ -383,7 +407,10 @@ class Characteristic:
         response = None
         if self.setter_callback:
             # pylint: disable=not-callable
-            response = self.setter_callback(value)
+            if _setter_wants_client_addr(self.setter_callback):
+                response = self.setter_callback(value, sender_client_addr)
+            else:
+                response = self.setter_callback(value)
         changed = self._value != previous_value
         if changed:
             self.notify(sender_client_addr)

@@ -25,7 +25,7 @@ import struct
 import sys
 from uuid import UUID
 
-from pyhap import RESOURCE_DIR, hksv, hksv_recording, tlv
+from pyhap import RESOURCE_DIR, hds, hds_recording, hds_server, hksv, hksv_recording, tlv
 from pyhap.accessory import Accessory
 from pyhap.const import CATEGORY_CAMERA
 from pyhap.util import base64_to_bytes, byte_bool, to_base64_str
@@ -582,6 +582,8 @@ class Camera(Accessory):
         self._publishing_point = None
         self._recording_service = None
         self._selected_recording_config = None
+        self._hds_listener = None
+        self._hds_connections = set()
         self._camera_keys = {}
         self._camera_key_id_char = None
         self._client_csr_key = None
@@ -1258,6 +1260,80 @@ class Camera(Accessory):
             setter_callback=self.set_selected_recording_configuration,
         )
         self._recording_service = service
+        self._setup_data_stream_transport()
+
+    def _setup_data_stream_transport(self):
+        """Create the Data Stream Transport Management service used by HDS.
+
+        SetupDataStreamTransport needs the HAP session shared secret, so its
+        setter receives the sender's client address to look the secret up.
+        """
+        transport = self.add_preload_service("DataStreamTransportManagement")
+        transport.configure_char("Version", value="1.0")
+        transport.configure_char(
+            "SupportedDataStreamTransportConfiguration",
+            value=to_base64_str(self._supported_data_stream_transport()),
+        )
+        transport.configure_char(
+            "SetupDataStreamTransport",
+            setter_callback=self.set_data_stream_transport,
+        )
+
+    @staticmethod
+    def _supported_data_stream_transport():
+        # A single supported transport configuration: TCP.
+        transport_configuration = tlv.encode(b"\x01", hds.TRANSPORT_TYPE_TCP)
+        return tlv.encode(b"\x01", transport_configuration)
+
+    async def _ensure_hds_listener(self):
+        if self._hds_listener is None:
+            self._hds_listener = hds_server.HDSListener()
+            self._hds_listener.on_connection = self._on_hds_connection
+            await self._hds_listener.start()
+
+    def _on_hds_connection(self, connection):
+        self._hds_connections.add(connection)
+        connection.on_close = self._hds_connections.discard
+        hds_recording.RecordingStreamManager(connection, self._recording_delegate)
+
+    def set_data_stream_transport(self, value, sender_client_addr=None):
+        """Handle a write to SetupDataStreamTransport (HDS session setup)."""
+        request = hds.SetupRequest.decode(base64_to_bytes(value))
+        shared_secret = self.driver.session_shared_keys.get(sender_client_addr)
+        if shared_secret is None or self._hds_listener is None:
+            response = hds.encode_setup_response(
+                0, b"", status=hds.SETUP_STATUS_GENERIC_ERROR
+            )
+        else:
+            accessory_salt = self._hds_listener.register_transport(
+                shared_secret, request.controller_key_salt
+            )
+            response = hds.encode_setup_response(
+                self._hds_listener.port, accessory_salt
+            )
+        self.get_service("DataStreamTransportManagement").get_characteristic(
+            "SetupDataStreamTransport"
+        ).set_value(to_base64_str(response))
+
+    async def _recording_delegate(self, stream_id):
+        """Yield recording fragments for ``stream_id``.
+
+        Override ``handle_recording_stream`` to produce the fragmented MP4
+        packets; this adapter exists so the transport can await an async
+        generator.
+        """
+        async for packet in self.handle_recording_stream(stream_id):
+            yield packet
+
+    async def handle_recording_stream(self, stream_id):
+        """Produce the fragmented-MP4 recording for ``stream_id``.
+
+        Override to yield :class:`pyhap.hds_recording.RecordingPacket` objects,
+        the first being the MP4 initialization segment. The default yields
+        nothing (no recording).
+        """
+        return
+        yield  # pragma: no cover - makes this an async generator
 
     @property
     def selected_recording_configuration(self):
@@ -1616,11 +1692,20 @@ class Camera(Accessory):
             response_tlv
         )
 
+    async def run(self):
+        """Start the HDS listener when recording transport is available."""
+        await super().run()
+        if self._recording_service is not None:
+            await self._ensure_hds_listener()
+
     async def stop(self):
-        """Stop all streaming sessions."""
+        """Stop all streaming sessions and the HDS listener."""
         await asyncio.gather(
             *(self.stop_stream(session_info) for session_info in self.sessions.values())
         )
+        if self._hds_listener is not None:
+            await self._hds_listener.stop()
+            self._hds_listener = None
 
     # ### For client extensions ###
 
