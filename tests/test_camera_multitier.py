@@ -602,3 +602,55 @@ def test_client_certificate_provisioning(buffer_camera):
     assert provisioned == [cert]
     # Provisioning a certificate clears the needs-update flag.
     assert not hksv.decode_certificate_status(base64_to_bytes(status_char.get_value()))
+
+
+def test_recording_management_default_inactive(multi_tier_camera):
+    from pyhap import hksv_recording as hr
+
+    camera = multi_tier_camera
+    service = camera.get_service("CameraRecordingManagement")
+    assert service.get_characteristic("Active").get_value() == 0
+
+    supported = hr.SupportedRecordingConfiguration.decode(
+        base64_to_bytes(
+            service.get_characteristic(
+                "SupportedCameraRecordingConfiguration"
+            ).get_value()
+        )
+    )
+    assert supported.media_containers[0].container_type is (
+        hr.MediaContainerType.FRAGMENTED_MP4
+    )
+    video = hr.decode_supported_video(
+        base64_to_bytes(
+            service.get_characteristic(
+                "SupportedVideoRecordingConfiguration"
+            ).get_value()
+        )
+    )
+    assert video[0].codec_type is hr.VideoCodecType.H265
+    assert video[0].attributes[0].width == 3840
+
+
+def test_selected_recording_configuration_hook(multi_tier_camera):
+    from pyhap import hksv_recording as hr
+
+    camera = multi_tier_camera
+    selected_seen = []
+    camera.recording_configuration_selected = selected_seen.append
+
+    selected = hr.SelectedRecordingConfiguration(
+        recording=hr.SupportedRecordingConfiguration(),
+        video=hr.VideoCodecConfiguration(
+            codec_type=hr.VideoCodecType.H265,
+            profile=2,
+            level=2,
+            bitrate_kbps=2000,
+            iframe_interval_ms=4000,
+            attributes=[hr.VideoAttributes(1920, 1080, 30)],
+        ),
+        audio=hr.AudioCodecConfiguration(),
+    )
+    camera.set_selected_recording_configuration(to_base64_str(selected.encode()))
+    assert selected_seen == [selected]
+    assert camera.selected_recording_configuration == selected

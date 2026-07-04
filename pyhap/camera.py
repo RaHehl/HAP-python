@@ -25,7 +25,7 @@ import struct
 import sys
 from uuid import UUID
 
-from pyhap import RESOURCE_DIR, hksv, tlv
+from pyhap import RESOURCE_DIR, hksv, hksv_recording, tlv
 from pyhap.accessory import Accessory
 from pyhap.const import CATEGORY_CAMERA
 from pyhap.util import base64_to_bytes, byte_bool, to_base64_str
@@ -580,6 +580,8 @@ class Camera(Accessory):
         self._buffer_service = None
         self._buffer_event_seq_char = None
         self._publishing_point = None
+        self._recording_service = None
+        self._selected_recording_config = None
         self._camera_keys = {}
         self._camera_key_id_char = None
         self._client_csr_key = None
@@ -656,12 +658,10 @@ class Camera(Accessory):
         operating_mode.configure_char("StreamingEnabled", value=True)
         operating_mode.configure_char("CameraOperatingModeIndicator", value=False)
 
-        # Declare HKSV recording explicitly OFF so the controller does not try to
-        # build a clip library (which loops on CameraClipsLibraryError.noZoneName
-        # when the recording services aren't implemented).
-        recording = self.add_preload_service("CameraRecordingManagement")
-        recording.configure_char("Active", value=0)
-        recording.configure_char("RecordingAudioActive", value=0)
+        # A Camera Recording Management service must be present or the controller
+        # loops on CameraClipsLibraryError.noZoneName; it advertises valid
+        # supported configurations and stays inactive unless recording is set up.
+        self._setup_recording_management(options)
 
         management = self.add_preload_service("CameraMultiTierRTPStreamManagement")
         management.configure_char("StreamingEnabled", value=True)
@@ -1197,6 +1197,84 @@ class Camera(Accessory):
 
     def client_certificate_received(self, certificate):
         """React to a provisioned client certificate. Override."""
+
+    def _default_recording_configs(self, options):
+        """Derive supported recording configurations from the tiers/options."""
+        tiers = options.get("video_tiers") or []
+        largest = (
+            max(tiers, key=lambda t: t["width"] * t["height"])
+            if tiers
+            else {"width": 1920, "height": 1080, "fps": 30, "codec": "H265"}
+        )
+        codec = hksv_recording.VideoCodecType[largest.get("codec", "H265")]
+        video = [
+            hksv_recording.VideoCodecConfiguration(
+                codec_type=codec,
+                profile=VIDEO_CODEC_PARAM_PROFILE_ID_TYPES["HIGH"][0],
+                level=VIDEO_CODEC_PARAM_LEVEL_TYPES["TYPE4_0"][0],
+                bitrate_kbps=largest.get("avg_bitrate", 2000),
+                iframe_interval_ms=4000,
+                attributes=[
+                    hksv_recording.VideoAttributes(
+                        largest["width"], largest["height"], largest.get("fps", 30)
+                    )
+                ],
+            )
+        ]
+        audio = [hksv_recording.AudioCodecConfiguration()]
+        general = hksv_recording.SupportedRecordingConfiguration()
+        return general, video, audio
+
+    def _setup_recording_management(self, options):
+        """Create the Camera Recording Management service (classic HKSV).
+
+        Advertises the supported general/video/audio recording configurations
+        and accepts the controller's selection. Recording stays inactive
+        (Active=0) unless the ``recording`` option enables it; the fragment
+        data flow over HDS is wired by the recording transport.
+        """
+        general, video, audio = self._default_recording_configs(options)
+        service = self.add_preload_service(
+            "CameraRecordingManagement", chars=["RecordingAudioActive"]
+        )
+        service.configure_char("Active", value=1 if options.get("recording") else 0)
+        service.configure_char(
+            "RecordingAudioActive", value=1 if options.get("recording_audio") else 0
+        )
+        service.configure_char(
+            "SupportedCameraRecordingConfiguration",
+            value=to_base64_str(general.encode()),
+        )
+        service.configure_char(
+            "SupportedVideoRecordingConfiguration",
+            value=to_base64_str(hksv_recording.encode_supported_video(video)),
+        )
+        service.configure_char(
+            "SupportedAudioRecordingConfiguration",
+            value=to_base64_str(hksv_recording.encode_supported_audio(audio)),
+        )
+        service.configure_char(
+            "SelectedCameraRecordingConfiguration",
+            setter_callback=self.set_selected_recording_configuration,
+        )
+        self._recording_service = service
+
+    @property
+    def selected_recording_configuration(self):
+        """The controller's selected recording configuration, if any."""
+        return self._selected_recording_config
+
+    def set_selected_recording_configuration(self, value):
+        """Handle a write to Selected Camera Recording Configuration (spec HKSV)."""
+        self._selected_recording_config = (
+            hksv_recording.SelectedRecordingConfiguration.decode(
+                base64_to_bytes(value)
+            )
+        )
+        self.recording_configuration_selected(self._selected_recording_config)
+
+    def recording_configuration_selected(self, configuration):
+        """React to the controller selecting a recording configuration. Override."""
 
     async def _start_stream(self, objs, reconfigure):  # pylint: disable=unused-argument
         """Start or reconfigure video streaming for the given session.

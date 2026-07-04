@@ -324,3 +324,86 @@ def test_rtp_streaming_control_unknown_command_passthrough():
     decoded = hksv.RTPStreamingControlWrite.decode(raw)
     assert decoded.command == 0
     assert not isinstance(decoded.command, hksv.RTPStreamingCommand)
+
+
+def test_recording_supported_config_roundtrip():
+    from pyhap import hksv_recording as hr
+
+    config = hr.SupportedRecordingConfiguration(
+        prebuffer_length_ms=4000,
+        event_triggers=hr.EventTrigger.MOTION | hr.EventTrigger.DOORBELL,
+        media_containers=[hr.MediaContainerConfiguration(fragment_length_ms=4000)],
+    )
+    decoded = hr.SupportedRecordingConfiguration.decode(config.encode())
+    assert decoded == config
+    assert decoded.event_triggers == 3
+
+
+def test_recording_supported_video_roundtrip():
+    from pyhap import hksv_recording as hr
+
+    configs = [
+        hr.VideoCodecConfiguration(
+            codec_type=hr.VideoCodecType.H265,
+            profile=2,
+            level=2,
+            bitrate_kbps=2000,
+            iframe_interval_ms=4000,
+            attributes=[
+                hr.VideoAttributes(3840, 2160, 30),
+                hr.VideoAttributes(1920, 1080, 30),
+            ],
+        ),
+        hr.VideoCodecConfiguration(
+            codec_type=hr.VideoCodecType.H264,
+            profile=0,
+            level=0,
+            bitrate_kbps=800,
+            iframe_interval_ms=4000,
+            attributes=[hr.VideoAttributes(1280, 720, 24)],
+        ),
+    ]
+    decoded = hr.decode_supported_video(hr.encode_supported_video(configs))
+    assert decoded == configs
+    assert decoded[0].attributes[0].width == 3840
+
+
+def test_recording_supported_audio_roundtrip():
+    from pyhap import hksv_recording as hr
+
+    configs = [
+        hr.AudioCodecConfiguration(
+            codec_type=hr.AudioCodecType.AAC_LC,
+            channels=1,
+            bitrate_mode=hr.BitRateMode.VARIABLE,
+            sample_rate=hr.AudioSampleRate.KHZ_32,
+            max_audio_bitrate_kbps=64,
+        ),
+        hr.AudioCodecConfiguration(
+            codec_type=hr.AudioCodecType.AAC_ELD,
+            sample_rate=hr.AudioSampleRate.KHZ_24,
+        ),
+    ]
+    decoded = hr.decode_supported_audio(hr.encode_supported_audio(configs))
+    assert decoded == configs
+
+
+def test_recording_selected_config_roundtrip():
+    from pyhap import hksv_recording as hr
+
+    selected = hr.SelectedRecordingConfiguration(
+        recording=hr.SupportedRecordingConfiguration(
+            prebuffer_length_ms=4000, event_triggers=hr.EventTrigger.MOTION
+        ),
+        video=hr.VideoCodecConfiguration(
+            codec_type=hr.VideoCodecType.H265,
+            profile=2,
+            level=2,
+            bitrate_kbps=2000,
+            iframe_interval_ms=4000,
+            attributes=[hr.VideoAttributes(1920, 1080, 30)],
+        ),
+        audio=hr.AudioCodecConfiguration(),
+    )
+    decoded = hr.SelectedRecordingConfiguration.decode(selected.encode())
+    assert decoded == selected

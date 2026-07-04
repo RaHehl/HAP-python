@@ -1980,5 +1980,38 @@
          "pr"
       ],
       "UUID": "00000130-0000-1000-8000-0026BB765291"
+   },
+   "SupportedCameraRecordingConfiguration": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00000205-0000-1000-8000-0026BB765291"
+   },
+   "SupportedVideoRecordingConfiguration": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00000206-0000-1000-8000-0026BB765291"
+   },
+   "SupportedAudioRecordingConfiguration": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00000207-0000-1000-8000-0026BB765291"
+   },
+   "SelectedCameraRecordingConfiguration": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "ev"
+      ],
+      "UUID": "00000209-0000-1000-8000-0026BB765291"
    }
 }

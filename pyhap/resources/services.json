@@ -629,10 +629,15 @@
       "UUID": "00008031-0000-1000-8000-0026BB765291"
    },
    "CameraRecordingManagement": {
-      "OptionalCharacteristics": [],
+      "OptionalCharacteristics": [
+         "RecordingAudioActive"
+      ],
       "RequiredCharacteristics": [
          "Active",
-         "RecordingAudioActive"
+         "SupportedCameraRecordingConfiguration",
+         "SupportedVideoRecordingConfiguration",
+         "SupportedAudioRecordingConfiguration",
+         "SelectedCameraRecordingConfiguration"
       ],
       "UUID": "00000204-0000-1000-8000-0026BB765291"
    },
