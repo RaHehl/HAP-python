@@ -593,6 +593,9 @@ class Camera(Accessory):
             self._setup_multi_tier_management(options)
         if options.get("webrtc"):
             self._setup_webrtc_management(options)
+        # Classic HKSV recording is independent of the 17.99 preview surfaces.
+        if options.get("recording"):
+            self._setup_recording_management(options)
         if options.get("buffer_management"):
             self._setup_buffer_management()
             self._setup_cmaf_provisioning()
@@ -663,11 +666,6 @@ class Camera(Accessory):
         operating_mode.configure_char("HomeKitCameraActive", value=True)
         operating_mode.configure_char("StreamingEnabled", value=True)
         operating_mode.configure_char("CameraOperatingModeIndicator", value=False)
-
-        # A Camera Recording Management service must be present or the controller
-        # loops on CameraClipsLibraryError.noZoneName; it advertises valid
-        # supported configurations and stays inactive unless recording is set up.
-        self._setup_recording_management(options)
 
         management = self.add_preload_service("CameraMultiTierRTPStreamManagement")
         management.configure_char("StreamingEnabled", value=True)
@@ -1256,7 +1254,7 @@ class Camera(Accessory):
             "CameraRecordingManagement", chars=["RecordingAudioActive"]
         )
         service.add_linked_service(motion)
-        service.configure_char("Active", value=1 if options.get("recording") else 0)
+        service.configure_char("Active", value=0)
         service.configure_char(
             "RecordingAudioActive", value=1 if options.get("recording_audio") else 0
         )

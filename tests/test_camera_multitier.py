@@ -91,6 +91,7 @@ def multi_tier_camera_fixture():
             "address": "127.0.0.1",
             "video_tiers": VIDEO_TIERS,
             "audio_tiers": AUDIO_TIERS,
+            "recording": True,
         }
         yield Camera(options, driver, "Cam")
 
@@ -691,6 +692,7 @@ def recording_camera_fixture():
             "srtp": True,
             "address": "127.0.0.1",
             "video_tiers": VIDEO_TIERS,
+            "recording": True,
         }
         camera = Camera(options, driver, "Cam")
         camera.driver = driver
