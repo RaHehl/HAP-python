@@ -364,7 +364,20 @@ def test_recording_supported_video_roundtrip():
         ),
     ]
     decoded = hr.decode_supported_video(hr.encode_supported_video(configs))
-    assert decoded == configs
+    assert len(decoded) == 2
+    assert decoded[0].codec_type == hr.VideoCodecType.H265
+    assert decoded[0].profile == 2 and decoded[0].level == 2
+    assert [(a.width, a.height, a.frame_rate) for a in decoded[0].attributes] == [
+        (3840, 2160, 30),
+        (1920, 1080, 30),
+    ]
+    assert decoded[1].codec_type == hr.VideoCodecType.H264
+    assert [(a.width, a.height, a.frame_rate) for a in decoded[1].attributes] == [
+        (1280, 720, 24)
+    ]
+    # The supported advertisement omits per-config bitrate / iframe interval;
+    # those only appear in the controller-selected configuration.
+    assert decoded[0].bitrate_kbps == 0 and decoded[0].iframe_interval_ms == 0
     assert decoded[0].attributes[0].width == 3840
 
 
@@ -385,7 +398,14 @@ def test_recording_supported_audio_roundtrip():
         ),
     ]
     decoded = hr.decode_supported_audio(hr.encode_supported_audio(configs))
-    assert decoded == configs
+    assert len(decoded) == 2
+    assert decoded[0].codec_type == hr.AudioCodecType.AAC_LC
+    assert decoded[0].channels == 1
+    assert decoded[0].sample_rate == hr.AudioSampleRate.KHZ_32
+    assert decoded[1].codec_type == hr.AudioCodecType.AAC_ELD
+    assert decoded[1].sample_rate == hr.AudioSampleRate.KHZ_24
+    # max-bitrate is omitted from the supported advertisement.
+    assert decoded[0].max_audio_bitrate_kbps == 0
 
 
 def test_recording_selected_config_roundtrip():

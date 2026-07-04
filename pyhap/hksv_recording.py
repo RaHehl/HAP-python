@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
 import struct
-from typing import List
+from typing import List, Union
 
 from pyhap import tlv
 
@@ -175,45 +175,81 @@ class VideoAttributes:
 @dataclass
 class VideoCodecConfiguration:
     codec_type: VideoCodecType
-    profile: int
-    level: int
+    profile: Union[int, List[int]]
+    level: Union[int, List[int]]
     bitrate_kbps: int
     iframe_interval_ms: int
     attributes: List[VideoAttributes]
 
     def encode(self) -> bytes:
+        # Matches HAP-NodeJS' SupportedVideoRecordingConfiguration exactly:
+        #   * one ProfileID (0x01) and one Level (0x02) TLV entry per supported
+        #     value, with a zero-length 0x00 separator between consecutive
+        #     entries of the SAME type (HAP list convention);
+        #   * NO bitrate/iframe-interval in the *supported* advertisement (those
+        #     only appear in the controller-written *selected* configuration);
+        #   * each VideoAttributes as its OWN 0x03 TLV, separated by 0x00 —
+        #     not bundled inside a single 0x03.
+        profiles = self.profile if isinstance(self.profile, (list, tuple)) else [self.profile]
+        levels = self.level if isinstance(self.level, (list, tuple)) else [self.level]
+        prof_bytes = _SEPARATOR.join(tlv.encode(b"\x01", _u8(p)) for p in profiles)
+        lvl_bytes = _SEPARATOR.join(tlv.encode(b"\x02", _u8(lvl)) for lvl in levels)
+        params = prof_bytes + lvl_bytes
+        attrs = _SEPARATOR.join(
+            tlv.encode(b"\x03", a.encode()) for a in self.attributes
+        )
+        return (
+            tlv.encode(b"\x01", _u8(self.codec_type))
+            + tlv.encode(b"\x02", params)
+            + attrs
+        )
+
+    def encode_selected(self) -> bytes:
+        """Encode the single, negotiated configuration the controller writes:
+        one profile/level plus bitrate + iframe interval and one resolution."""
+        profile = self.profile[0] if isinstance(self.profile, (list, tuple)) else self.profile
+        level = self.level[0] if isinstance(self.level, (list, tuple)) else self.level
         params = tlv.encode(
-            b"\x01", _u8(self.profile),
-            b"\x02", _u8(self.level),
+            b"\x01", _u8(profile),
+            b"\x02", _u8(level),
             b"\x03", _u32(self.bitrate_kbps),
             b"\x04", _u32(self.iframe_interval_ms),
         )
         return tlv.encode(
             b"\x01", _u8(self.codec_type),
             b"\x02", params,
-            b"\x03", _join([a.encode() for a in self.attributes]),
+            b"\x03", self.attributes[0].encode(),
         )
 
     @classmethod
     def decode(cls, data: bytes) -> "VideoCodecConfiguration":
         d = _decode(data)
         params = _decode(d[2])
+        # Attributes are separate top-level 0x03 TLVs; gather them all. Bitrate
+        # (0x03) and iframe interval (0x04) are only present in the controller's
+        # SELECTED config, absent from the supported advertisement.
+        attributes = [
+            VideoAttributes.decode(v) for t, v in _iter(data) if t == 3
+        ]
         return cls(
             codec_type=VideoCodecType(_int(d[1])),
             profile=_int(params[1]),
             level=_int(params[2]),
-            bitrate_kbps=_int(params[3]),
-            iframe_interval_ms=_int(params[4]),
-            attributes=[VideoAttributes.decode(i) for i in _split(d[3])],
+            bitrate_kbps=_int(params[3]) if 3 in params else 0,
+            iframe_interval_ms=_int(params[4]) if 4 in params else 0,
+            attributes=attributes,
         )
 
 
 def encode_supported_video(configs: List[VideoCodecConfiguration]) -> bytes:
-    return tlv.encode(b"\x01", _join([c.encode() for c in configs]))
+    # Each configuration is its own 0x01 TLV; multiple configs are separated by
+    # a zero-length 0x00 TLV (a config's own body already contains 0x00 list
+    # separators, so we must not flatten them under a single 0x01).
+    return _SEPARATOR.join(tlv.encode(b"\x01", c.encode()) for c in configs)
 
 
 def decode_supported_video(data: bytes) -> List[VideoCodecConfiguration]:
-    return [VideoCodecConfiguration.decode(i) for i in _split(_decode(data)[1])]
+    return [VideoCodecConfiguration.decode(v) for t, v in _iter(data) if t == 1]
 
 
 @dataclass
@@ -225,6 +261,18 @@ class AudioCodecConfiguration:
     max_audio_bitrate_kbps: int = 64
 
     def encode(self) -> bytes:
+        # Matches HAP-NodeJS' SupportedAudioRecordingConfiguration: channels,
+        # bit-rate mode and sample rate only — no max-bitrate field.
+        params = tlv.encode(
+            b"\x01", _u8(self.channels),
+            b"\x02", _u8(self.bitrate_mode),
+            b"\x03", _u8(self.sample_rate),
+        )
+        return tlv.encode(b"\x01", _u8(self.codec_type), b"\x02", params)
+
+    def encode_selected(self) -> bytes:
+        """The negotiated audio config the controller writes includes the
+        max-bitrate field that the supported advertisement omits."""
         params = tlv.encode(
             b"\x01", _u8(self.channels),
             b"\x02", _u8(self.bitrate_mode),
@@ -242,16 +290,16 @@ class AudioCodecConfiguration:
             channels=_int(params[1]),
             bitrate_mode=BitRateMode(_int(params[2])),
             sample_rate=AudioSampleRate(_int(params[3])),
-            max_audio_bitrate_kbps=_int(params[4]),
+            max_audio_bitrate_kbps=_int(params[4]) if 4 in params else 0,
         )
 
 
 def encode_supported_audio(configs: List[AudioCodecConfiguration]) -> bytes:
-    return tlv.encode(b"\x01", _join([c.encode() for c in configs]))
+    return _SEPARATOR.join(tlv.encode(b"\x01", c.encode()) for c in configs)
 
 
 def decode_supported_audio(data: bytes) -> List[AudioCodecConfiguration]:
-    return [AudioCodecConfiguration.decode(i) for i in _split(_decode(data)[1])]
+    return [AudioCodecConfiguration.decode(v) for t, v in _iter(data) if t == 1]
 
 
 @dataclass
@@ -263,10 +311,12 @@ class SelectedRecordingConfiguration:
     audio: AudioCodecConfiguration
 
     def encode(self) -> bytes:
+        # The selected configuration carries the single negotiated codec params
+        # (with bitrate/iframe), not the multi-value supported advertisement.
         return tlv.encode(
             b"\x01", self.recording.encode(),
-            b"\x02", self.video.encode(),
-            b"\x03", self.audio.encode(),
+            b"\x02", self.video.encode_selected(),
+            b"\x03", self.audio.encode_selected(),
         )
 
     @classmethod
