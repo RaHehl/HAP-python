@@ -615,8 +615,12 @@ class Camera(Accessory):
     def _create_stream_management(self, stream_idx, options):
         """Create a stream management service."""
         management = self.add_preload_service(
-            "CameraRTPStreamManagement", unique_id=stream_idx
+            "CameraRTPStreamManagement", unique_id=stream_idx, chars=["Active"]
         )
+        # HAP-NodeJS exposes an Active (0x0B0) characteristic on every stream
+        # management service (value 1 = active); iOS' camera validation expects
+        # it, and it is required for Secure Video eligibility.
+        management.configure_char("Active", value=1)
         management.configure_char(
             "StreamingStatus",
             getter_callback=lambda: self._get_streaming_status(stream_idx),
@@ -1240,14 +1244,19 @@ class Camera(Accessory):
         # Classic HKSV requires the R17 Camera Operating Mode service (0000021A);
         # the controller validates its presence before enabling recording. This
         # is distinct from the 17.99 preview Camera Global Operating Mode (8032).
-        operating_mode = self.add_preload_service("CameraOperatingMode")
+        operating_mode = self.add_preload_service(
+            "CameraOperatingMode", chars=["PeriodicSnapshotsActive"]
+        )
         operating_mode.configure_char("EventSnapshotsActive", value=1)
         operating_mode.configure_char("HomeKitCameraActive", value=1)
+        operating_mode.configure_char("PeriodicSnapshotsActive", value=1)
 
         # HKSV records on an event trigger; the camera owns a motion sensor and
         # links it (and the data stream transport) to the recording management.
-        motion = self.add_preload_service("MotionSensor")
+        motion = self.add_preload_service("MotionSensor", chars=["StatusActive"])
         self._motion_detected_char = motion.configure_char("MotionDetected", value=False)
+        # HAP-NodeJS marks the HKSV event-trigger sensor as active; iOS expects it.
+        motion.configure_char("StatusActive", value=True)
 
         general, video, audio = self._default_recording_configs(options)
         service = self.add_preload_service(
@@ -1316,7 +1325,16 @@ class Camera(Accessory):
         hds_recording.RecordingStreamManager(connection, self._recording_delegate)
 
     def set_data_stream_transport(self, value, sender_client_addr=None):
-        """Handle a write to SetupDataStreamTransport (HDS session setup)."""
+        """Handle a write to SetupDataStreamTransport (HDS session setup).
+
+        SetupDataStreamTransport is a write-response ('wr') characteristic: the
+        controller writes with ``r: true`` and reads the encoded setup response
+        (TCP listening port + accessory key salt) straight back from the write
+        response. That means the value MUST be RETURNED from the setter so the
+        HAP layer includes it in the write response — setting it on the
+        characteristic is not delivered to the controller and leaves it without
+        the port, so it can never open the HDS connection.
+        """
         request = hds.SetupRequest.decode(base64_to_bytes(value))
         shared_secret = self.driver.session_shared_keys.get(sender_client_addr)
         if shared_secret is None or self._hds_listener is None:
@@ -1330,9 +1348,7 @@ class Camera(Accessory):
             response = hds.encode_setup_response(
                 self._hds_listener.port, accessory_salt
             )
-        self.get_service("DataStreamTransportManagement").get_characteristic(
-            "SetupDataStreamTransport"
-        ).set_value(to_base64_str(response))
+        return to_base64_str(response)
 
     async def _recording_delegate(self, stream_id):
         """Yield recording fragments for ``stream_id``.

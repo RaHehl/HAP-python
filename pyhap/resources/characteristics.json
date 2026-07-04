@@ -1611,8 +1611,7 @@
       "Format": "string",
       "MaximumLength": 64,
       "Permissions": [
-         "pr",
-         "ev"
+         "pr"
       ],
       "UUID": "00000037-0000-1000-8000-0026BB765291"
    },
@@ -1697,12 +1696,16 @@
       "UUID": "00000265-0000-1000-8000-0026BB765291"
    },
    "HomeKitCameraActive": {
-      "Format": "bool",
+      "Format": "uint8",
       "Permissions": [
          "pr",
          "pw",
          "ev"
       ],
+      "ValidValues": {
+         "Disable": 0,
+         "Enable": 1
+      },
       "UUID": "0000021B-0000-1000-8000-0026BB765291"
    },
    "CameraOperatingModeIndicator": {
@@ -1780,12 +1783,17 @@
       "UUID": "00008045-0000-1000-8000-0026BB765291"
    },
    "RecordingAudioActive": {
-      "Format": "bool",
+      "Format": "uint8",
       "Permissions": [
          "pr",
          "pw",
-         "ev"
+         "ev",
+         "tw"
       ],
+      "ValidValues": {
+         "Disable": 0,
+         "Enable": 1
+      },
       "UUID": "00000226-0000-1000-8000-0026BB765291"
    },
    "MotionEnabled": {

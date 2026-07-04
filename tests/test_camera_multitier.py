@@ -105,7 +105,8 @@ def test_multi_tier_service_setup(multi_tier_camera):
     assert tiers_value == GOLDEN_VIDEO_TIERS
 
     operating_mode = camera.get_service("CameraGlobalOperatingMode")
-    assert operating_mode.get_characteristic("HomeKitCameraActive").get_value() is True
+    # HomeKitCameraActive is a uint8 (0/1) per the HAP spec, not a bool.
+    assert operating_mode.get_characteristic("HomeKitCameraActive").get_value() == 1
 
     # Recording is declared off; without the service the controller loops on
     # CameraClipsLibraryError.noZoneName.
@@ -720,13 +721,11 @@ def test_setup_data_stream_transport_without_session_errors(recording_camera):
     request = hds.tlv.encode(
         hds.SETUP_TYPES["CONTROLLER_KEY_SALT"], b"\x11" * 32
     )
-    camera.set_data_stream_transport(
+    # SetupDataStreamTransport is a write-response characteristic: the encoded
+    # response is RETURNED from the setter (so HAP puts it in the write
+    # response), not stored on the characteristic.
+    value = camera.set_data_stream_transport(
         to_base64_str(request), sender_client_addr=("10.0.0.9", 5000)
-    )
-    value = (
-        camera.get_service("DataStreamTransportManagement")
-        .get_characteristic("SetupDataStreamTransport")
-        .get_value()
     )
     objs = hds.tlv.decode(base64_to_bytes(value))
     assert objs[hds.SETUP_RESPONSE_TYPES["STATUS"]] == hds.SETUP_STATUS_GENERIC_ERROR
@@ -747,16 +746,20 @@ async def test_setup_data_stream_transport_with_session(recording_camera):
         request = hds.tlv.encode(
             hds.SETUP_TYPES["CONTROLLER_KEY_SALT"], os.urandom(32)
         )
-        camera.set_data_stream_transport(
+        value = camera.set_data_stream_transport(
             to_base64_str(request), sender_client_addr=client
-        )
-        value = (
-            camera.get_service("DataStreamTransportManagement")
-            .get_characteristic("SetupDataStreamTransport")
-            .get_value()
         )
         objs = hds.tlv.decode(base64_to_bytes(value))
         assert objs[hds.SETUP_RESPONSE_TYPES["STATUS"]] == hds.SETUP_STATUS_SUCCESS
         assert objs[hds.SETUP_RESPONSE_TYPES["ACCESSORY_KEY_SALT"]]
+        # The write response must carry the accessory's TCP listening port so
+        # the controller can open the HDS connection.
+        session_params = hds.tlv.decode(
+            objs[hds.SETUP_RESPONSE_TYPES["TRANSPORT_TYPE_SESSION_PARAMETERS"]]
+        )
+        port = int.from_bytes(
+            session_params[hds.TRANSPORT_SESSION_PARAM_TCP_LISTENING_PORT], "little"
+        )
+        assert port == camera._hds_listener.port
     finally:
         await camera.stop()
