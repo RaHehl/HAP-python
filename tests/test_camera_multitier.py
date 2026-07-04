@@ -115,6 +115,11 @@ def test_multi_tier_service_setup(multi_tier_camera):
     capabilities = camera.get_service("CameraCapabilities")
     assert capabilities.get_characteristic("Version").get_value() == "17.99"
 
+    # The state references must survive init (a setup result must not be reset
+    # to None by a later attribute initialization).
+    assert camera._recording_service is not None
+    assert camera._selected_recording_config is None
+
 
 def _control_response(camera):
     value = (

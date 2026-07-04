@@ -559,22 +559,13 @@ class Camera(Accessory):
         self._management = []
         self._multi_tier = bool(options.get("video_tiers"))
         self._multi_tier_idx = None
-        # The legacy CameraRTPStreamManagement service and the new HKSV multi-tier
-        # service can coexist on one accessory (legacy H.264 as the baseline that
-        # iOS recognises, plus the new HEVC tiers as an enhancement). Set up
-        # whichever the options describe.
-        if options.get("video"):
-            self._setup_stream_management(options)
-        if self._multi_tier:
-            self._video_tiers = {t["id"]: t for t in options["video_tiers"]}
-            self._audio_tiers = {t["id"]: t for t in options.get("audio_tiers", [])}
-            self._status_active_char = None
-            self._setup_multi_tier_management(options)
+        self._status_active_char = None
+        # All HKSV state defaults are initialized before any setup runs; the
+        # setup methods below populate them, so their init must not follow (and
+        # reset) the setup calls.
         self._webrtc_sessions = {}
         self._webrtc_service = None
         self._webrtc_active_sessions_char = None
-        if options.get("webrtc"):
-            self._setup_webrtc_management(options)
         self._buffer_events = []
         self._buffer_event_seq = 0
         self._buffer_service = None
@@ -589,6 +580,18 @@ class Camera(Accessory):
         self._client_csr_key = None
         self._client_certificate = None
         self._certificate_status_char = None
+        # The legacy CameraRTPStreamManagement service and the new HKSV multi-tier
+        # service can coexist on one accessory (legacy H.264 as the baseline that
+        # iOS recognises, plus the new HEVC tiers as an enhancement). Set up
+        # whichever the options describe.
+        if options.get("video"):
+            self._setup_stream_management(options)
+        if self._multi_tier:
+            self._video_tiers = {t["id"]: t for t in options["video_tiers"]}
+            self._audio_tiers = {t["id"]: t for t in options.get("audio_tiers", [])}
+            self._setup_multi_tier_management(options)
+        if options.get("webrtc"):
+            self._setup_webrtc_management(options)
         if options.get("buffer_management"):
             self._setup_buffer_management()
             self._setup_cmaf_provisioning()
