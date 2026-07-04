@@ -1281,6 +1281,10 @@ class Camera(Accessory):
             "SetupDataStreamTransport",
             setter_callback=self.set_data_stream_transport,
         )
+        # HKSV requires the recording management service to link the data stream
+        # transport it records over; without the link the controller rejects
+        # recording during validation, before writing any configuration.
+        self._recording_service.add_linked_service(transport)
 
     @staticmethod
     def _supported_data_stream_transport():
