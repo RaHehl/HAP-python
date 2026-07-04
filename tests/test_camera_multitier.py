@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 
-from pyhap import hksv
+from pyhap import hksv, tlv
 from pyhap.accessory_driver import AccessoryDriver
 from pyhap import camera as camera_module
 from pyhap.camera import Camera
@@ -542,3 +542,63 @@ def test_buffer_activity_and_publishing_point(buffer_camera):
     camera.set_recording_publishing_point(to_base64_str(point.encode()))
     assert camera.publishing_point == point
     assert points == [point]
+
+
+def test_camera_key_management(buffer_camera):
+    camera = buffer_camera
+    received = []
+    camera.camera_key_received = received.append
+
+    camera.set_camera_key(
+        to_base64_str(hksv.CameraKey(key=b"\x42" * 32, key_number=7).encode())
+    )
+    assert received[0].key_number == 7
+    assert camera._camera_keys[7].key == b"\x42" * 32
+
+    key_id_value = (
+        camera.get_service("CameraKeyManagement")
+        .get_characteristic("CameraKeyID")
+        .get_value()
+    )
+    assert hksv.decode_camera_key_id(base64_to_bytes(key_id_value)) == 7
+
+
+def test_client_csr_default_implementation(buffer_camera):
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    camera = buffer_camera
+    nonce = b"\x11" * 32
+    camera.set_camera_client_csr(to_base64_str(tlv.encode(b"\x01", nonce)))
+
+    response = base64_to_bytes(
+        camera.get_service("CameraClientCertificateManagement")
+        .get_characteristic("CameraClientCSR")
+        .get_value()
+    )
+    d = hksv._decode(response)
+    csr = x509.load_der_x509_csr(d[1])
+    assert csr.is_signature_valid
+    assert len(d[2]) <= 128
+    # The nonce signature verifies against the CSR's public key.
+    csr.public_key().verify(d[2], nonce, ec.ECDSA(hashes.SHA256()))
+
+
+def test_client_certificate_provisioning(buffer_camera):
+    camera = buffer_camera
+    provisioned = []
+    camera.client_certificate_received = provisioned.append
+
+    camera.set_certificate_needs_update(True)
+    status_char = camera.get_service(
+        "CameraClientCertificateManagement"
+    ).get_characteristic("CameraClientCertificateStatus")
+    assert hksv.decode_certificate_status(base64_to_bytes(status_char.get_value()))
+
+    cert = hksv.ClientCertificate(certificate=b"\x30\x82CERT", ca=b"\x30\x82CA")
+    camera.set_camera_client_certificate(to_base64_str(cert.encode()))
+    assert camera.client_certificate == cert
+    assert provisioned == [cert]
+    # Provisioning a certificate clears the needs-update flag.
+    assert not hksv.decode_certificate_status(base64_to_bytes(status_char.get_value()))

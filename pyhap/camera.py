@@ -580,8 +580,14 @@ class Camera(Accessory):
         self._buffer_service = None
         self._buffer_event_seq_char = None
         self._publishing_point = None
+        self._camera_keys = {}
+        self._camera_key_id_char = None
+        self._client_csr_key = None
+        self._client_certificate = None
+        self._certificate_status_char = None
         if options.get("buffer_management"):
             self._setup_buffer_management()
+            self._setup_cmaf_provisioning()
 
     @property
     def streaming_status(self):
@@ -1095,6 +1101,102 @@ class Camera(Accessory):
 
     def publishing_point_updated(self, point):
         """React to a new CMAF publishing point (URL + server CAs). Override."""
+
+    def _setup_cmaf_provisioning(self):
+        """Create the Camera Key and Client Certificate Management services
+        (spec 3.9, 3.10) used by the CMAF ingest provisioning process."""
+        keys = self.add_preload_service("CameraKeyManagement")
+        keys.configure_char("CameraKey", setter_callback=self.set_camera_key)
+        self._camera_key_id_char = keys.configure_char("CameraKeyID")
+
+        certs = self.add_preload_service("CameraClientCertificateManagement")
+        certs.configure_char(
+            "CameraClientCSR", setter_callback=self.set_camera_client_csr
+        )
+        certs.configure_char(
+            "CameraClientCertificate",
+            setter_callback=self.set_camera_client_certificate,
+        )
+        self._certificate_status_char = certs.configure_char(
+            "CameraClientCertificateStatus",
+            value=to_base64_str(hksv.encode_certificate_status(False)),
+        )
+        self._cert_service = certs
+
+    @property
+    def client_certificate(self):
+        """The provisioned CMAF ingest client certificate, if any."""
+        return self._client_certificate
+
+    def set_camera_key(self, value):
+        """Handle a write to Camera Key (spec 4.7)."""
+        key = hksv.CameraKey.decode(base64_to_bytes(value))
+        self._camera_keys[key.key_number] = key
+        self._camera_key_id_char.set_value(
+            to_base64_str(hksv.encode_camera_key_id(key.key_number))
+        )
+        self.camera_key_received(key)
+
+    def set_camera_client_csr(self, value):
+        """Handle a write to Camera Client CSR (spec 4.25).
+
+        The write carries a 32-byte nonce; the response is a DER CSR plus an
+        elliptic curve signature of the nonce by the CSR's private key.
+        """
+        nonce = hksv.decode_client_csr_write(base64_to_bytes(value))
+        csr_der, nonce_signature = self.create_client_csr(nonce)
+        self._cert_service.get_characteristic("CameraClientCSR").set_value(
+            to_base64_str(hksv.encode_client_csr_response(csr_der, nonce_signature))
+        )
+
+    def set_camera_client_certificate(self, value):
+        """Handle a write to Camera Client Certificate (spec 4.26)."""
+        self._client_certificate = hksv.ClientCertificate.decode(
+            base64_to_bytes(value)
+        )
+        self.set_certificate_needs_update(False)
+        self.client_certificate_received(self._client_certificate)
+
+    def set_certificate_needs_update(self, needs_update):
+        """Publish whether the client certificate needs an update (spec 4.27)."""
+        self._certificate_status_char.set_value(
+            to_base64_str(hksv.encode_certificate_status(needs_update))
+        )
+
+    def create_client_csr(self, nonce):
+        """Create the CMAF ingest client CSR and sign the controller's nonce.
+
+        The default generates an in-memory P-256 key per accessory run;
+        override to persist the key or to delegate to a secure element.
+        """
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+
+        if self._client_csr_key is None:
+            self._client_csr_key = ec.generate_private_key(ec.SECP256R1())
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(
+                x509.Name(
+                    [x509.NameAttribute(NameOID.COMMON_NAME, self.display_name)]
+                )
+            )
+            .sign(self._client_csr_key, hashes.SHA256())
+        )
+        from cryptography.hazmat.primitives.serialization import Encoding
+
+        nonce_signature = self._client_csr_key.sign(
+            nonce, ec.ECDSA(hashes.SHA256())
+        )
+        return csr.public_bytes(Encoding.DER), nonce_signature
+
+    def camera_key_received(self, key):
+        """React to a new camera key from the controller. Override."""
+
+    def client_certificate_received(self, certificate):
+        """React to a provisioned client certificate. Override."""
 
     async def _start_stream(self, objs, reconfigure):  # pylint: disable=unused-argument
         """Start or reconfigure video streaming for the given session.
