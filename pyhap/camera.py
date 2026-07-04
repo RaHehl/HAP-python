@@ -1238,6 +1238,13 @@ class Camera(Accessory):
         (Active=0) unless the ``recording`` option enables it; the fragment
         data flow over HDS is wired by the recording transport.
         """
+        # Classic HKSV requires the R17 Camera Operating Mode service (0000021A);
+        # the controller validates its presence before enabling recording. This
+        # is distinct from the 17.99 preview Camera Global Operating Mode (8032).
+        operating_mode = self.add_preload_service("CameraOperatingMode")
+        operating_mode.configure_char("EventSnapshotsActive", value=1)
+        operating_mode.configure_char("HomeKitCameraActive", value=1)
+
         general, video, audio = self._default_recording_configs(options)
         service = self.add_preload_service(
             "CameraRecordingManagement", chars=["RecordingAudioActive"]

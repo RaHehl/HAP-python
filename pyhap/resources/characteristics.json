@@ -2013,5 +2013,31 @@
          "ev"
       ],
       "UUID": "00000209-0000-1000-8000-0026BB765291"
+   },
+   "EventSnapshotsActive": {
+      "Format": "uint8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "ev"
+      ],
+      "UUID": "00000223-0000-1000-8000-0026BB765291",
+      "ValidValues": {
+         "Disable": 0,
+         "Enable": 1
+      }
+   },
+   "PeriodicSnapshotsActive": {
+      "Format": "uint8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "ev"
+      ],
+      "UUID": "00000225-0000-1000-8000-0026BB765291",
+      "ValidValues": {
+         "Disable": 0,
+         "Enable": 1
+      }
    }
 }

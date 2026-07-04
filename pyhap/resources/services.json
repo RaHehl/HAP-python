@@ -702,5 +702,19 @@
          "Version"
       ],
       "UUID": "00000129-0000-1000-8000-0026BB765291"
+   },
+   "CameraOperatingMode": {
+      "OptionalCharacteristics": [
+         "CameraOperatingModeIndicator",
+         "ManuallyDisabled",
+         "NightVision",
+         "PeriodicSnapshotsActive",
+         "ThirdPartyCameraActive"
+      ],
+      "RequiredCharacteristics": [
+         "EventSnapshotsActive",
+         "HomeKitCameraActive"
+      ],
+      "UUID": "0000021A-0000-1000-8000-0026BB765291"
    }
 }
