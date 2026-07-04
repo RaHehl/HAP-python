@@ -406,3 +406,139 @@ def test_webrtc_reoffer_success(webrtc_camera):
     )
     assert reoffer.status is hksv.WebRTCStreamingStatus.SUCCESS
     assert reoffer.sdp_answer == "v=0\r\nanswer"
+
+
+@pytest.fixture(name="buffer_camera")
+def buffer_camera_fixture():
+    with patch(
+        "pyhap.accessory_driver.AccessoryDriver.persist"
+    ), patch("pyhap.accessory_driver.AccessoryDriver.load"):
+        driver = AccessoryDriver(loop=MagicMock(), listen_address="127.0.0.1")
+        options = {
+            "video": {
+                "codec": {
+                    "profiles": [
+                        camera_module.VIDEO_CODEC_PARAM_PROFILE_ID_TYPES["BASELINE"]
+                    ],
+                    "levels": [camera_module.VIDEO_CODEC_PARAM_LEVEL_TYPES["TYPE3_1"]],
+                },
+                "resolutions": [[640, 360, 15]],
+            },
+            "audio": {"codecs": [{"type": "OPUS", "samplerate": 24}]},
+            "srtp": True,
+            "address": "127.0.0.1",
+            "video_tiers": VIDEO_TIERS,
+            "buffer_management": True,
+        }
+        yield Camera(options, driver, "Cam")
+
+
+def _buffer_char(camera, name):
+    return camera.get_service("CameraBufferManagement").get_characteristic(name)
+
+
+def test_buffer_event_queue_notify_query_acknowledge(buffer_camera):
+    camera = buffer_camera
+    assert _buffer_char(camera, "BufferEventSequenceNumber").get_value() == 0
+
+    seq1 = camera.queue_buffer_event(
+        hksv.BufferEventType.CMAF_SESSION_START, cmaf_session_id=5
+    )
+    seq2 = camera.queue_buffer_event(hksv.BufferEventType.MOTION, motion_active=True)
+    seq3 = camera.queue_buffer_event(
+        hksv.BufferEventType.CMAF_ERROR,
+        cmaf_session_id=5,
+        cmaf_error=hksv.CMAFError.TIMEOUT,
+    )
+    assert (seq1, seq2, seq3) == (1, 2, 3)
+    assert _buffer_char(camera, "BufferEventSequenceNumber").get_value() == 3
+
+    # Query from seq 2, unlimited
+    camera.set_buffer_event_command(
+        to_base64_str(
+            hksv.BufferEventCommand(
+                command=hksv.BufferEventCommandType.QUERY, sequence_number=2
+            ).encode()
+        )
+    )
+    events = hksv.decode_buffer_events_response(
+        base64_to_bytes(_buffer_char(camera, "BufferEventCommand").get_value())
+    )
+    assert [e.sequence_number for e in events] == [2, 3]
+    assert events[1].cmaf_error is hksv.CMAFError.TIMEOUT
+
+    # Query with limit
+    camera.set_buffer_event_command(
+        to_base64_str(
+            hksv.BufferEventCommand(
+                command=hksv.BufferEventCommandType.QUERY, sequence_number=1, limit=1
+            ).encode()
+        )
+    )
+    events = hksv.decode_buffer_events_response(
+        base64_to_bytes(_buffer_char(camera, "BufferEventCommand").get_value())
+    )
+    assert [e.sequence_number for e in events] == [1]
+
+    # Acknowledge trims everything up to seq 2
+    camera.set_buffer_event_command(
+        to_base64_str(
+            hksv.BufferEventCommand(
+                command=hksv.BufferEventCommandType.ACKNOWLEDGE, sequence_number=2
+            ).encode()
+        )
+    )
+    assert [e.sequence_number for e in camera._buffer_events] == [3]
+
+
+def test_buffer_upload_command_hook(buffer_camera):
+    camera = buffer_camera
+    received = []
+
+    def _upload(command):
+        received.append(command)
+        return 77
+
+    camera.buffer_upload = _upload
+    camera.set_buffer_upload_command(
+        to_base64_str(
+            hksv.BufferUploadCommand(
+                session_id=5,
+                command=hksv.BufferCommand.START_AND_STOP,
+                start=1000,
+                stop=5000,
+                stop_action=hksv.BufferStopAction.FINALIZE,
+            ).encode()
+        )
+    )
+    assert received[0].stop_action is hksv.BufferStopAction.FINALIZE
+    clip_id = hksv.decode_buffer_upload_response(
+        base64_to_bytes(_buffer_char(camera, "BufferUploadCommand").get_value())
+    )
+    assert clip_id == 77
+
+
+def test_buffer_activity_and_publishing_point(buffer_camera):
+    camera = buffer_camera
+    seen = []
+    camera.buffer_activity = seen.append
+    camera.set_buffer_activity_command(
+        to_base64_str(
+            hksv.BufferActivityCommand(
+                start=1000,
+                duration_ms=30000,
+                activity=hksv.BufferActivity.SHOULD_NOT_RECORD,
+            ).encode()
+        )
+    )
+    assert seen[0].activity is hksv.BufferActivity.SHOULD_NOT_RECORD
+
+    points = []
+    camera.publishing_point_updated = points.append
+    point = hksv.PublishingPoint(
+        url="https://hub.local:8443/ingest/",
+        server_ca_certificates=[b"\x30\x82\x01\x00"],
+    )
+    camera.set_recording_publishing_point(to_base64_str(point.encode()))
+    assert camera.publishing_point == point
+    assert points == [point]

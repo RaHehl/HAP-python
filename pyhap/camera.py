@@ -575,6 +575,13 @@ class Camera(Accessory):
         self._webrtc_active_sessions_char = None
         if options.get("webrtc"):
             self._setup_webrtc_management(options)
+        self._buffer_events = []
+        self._buffer_event_seq = 0
+        self._buffer_service = None
+        self._buffer_event_seq_char = None
+        self._publishing_point = None
+        if options.get("buffer_management"):
+            self._setup_buffer_management()
 
     @property
     def streaming_status(self):
@@ -986,6 +993,108 @@ class Camera(Accessory):
 
     def webrtc_end_session(self, session_identifier):
         """Tear down a session's WebRTC resources. Override."""
+
+    def _setup_buffer_management(self):
+        """Create the Camera Buffer Management service (spec 3.5).
+
+        The lib owns the Camera Event Queue (sequence numbers, query and
+        acknowledge); buffering, uploads and CMAF ingest are supplied by
+        overriding the ``buffer_*`` hooks and calling ``queue_buffer_event``.
+        """
+        service = self.add_preload_service("CameraBufferManagement")
+        service.configure_char(
+            "BufferUploadCommand", setter_callback=self.set_buffer_upload_command
+        )
+        service.configure_char(
+            "BufferActivityCommand", setter_callback=self.set_buffer_activity_command
+        )
+        service.configure_char(
+            "BufferEventCommand", setter_callback=self.set_buffer_event_command
+        )
+        self._buffer_event_seq_char = service.configure_char(
+            "BufferEventSequenceNumber", value=0
+        )
+        service.configure_char(
+            "CameraRecordingPublishingPoint",
+            setter_callback=self.set_recording_publishing_point,
+        )
+        self._buffer_service = service
+
+    @property
+    def publishing_point(self):
+        """The CMAF publishing point written by the controller, if any."""
+        return self._publishing_point
+
+    def queue_buffer_event(
+        self, event_type, cmaf_session_id=None, motion_active=None, cmaf_error=None
+    ):
+        """Queue a Camera Event and notify its sequence number.
+
+        Returns the assigned sequence number. The controller fetches the queue
+        via Buffer Event Command and trims it with an Acknowledge.
+        """
+        self._buffer_event_seq += 1
+        event = hksv.BufferEvent(
+            sequence_number=self._buffer_event_seq,
+            type=event_type,
+            cmaf_session_id=cmaf_session_id,
+            motion_active=motion_active,
+            cmaf_error=cmaf_error,
+        )
+        self._buffer_events.append(event)
+        self._buffer_event_seq_char.set_value(self._buffer_event_seq)
+        return self._buffer_event_seq
+
+    def set_buffer_upload_command(self, value):
+        """Handle a write to Buffer Upload Command (spec 4.9)."""
+        command = hksv.BufferUploadCommand.decode(base64_to_bytes(value))
+        clip_id = self.buffer_upload(command)
+        self._buffer_service.get_characteristic("BufferUploadCommand").set_value(
+            to_base64_str(hksv.encode_buffer_upload_response(clip_id or 0))
+        )
+
+    def set_buffer_activity_command(self, value):
+        """Handle a write to Buffer Activity Command (spec 4.10)."""
+        self.buffer_activity(
+            hksv.BufferActivityCommand.decode(base64_to_bytes(value))
+        )
+
+    def set_buffer_event_command(self, value):
+        """Handle a write to Buffer Event Command (spec 4.11): query/acknowledge."""
+        command = hksv.BufferEventCommand.decode(base64_to_bytes(value))
+        if command.command is hksv.BufferEventCommandType.ACKNOWLEDGE:
+            self._buffer_events = [
+                e
+                for e in self._buffer_events
+                if e.sequence_number > command.sequence_number
+            ]
+            events = []
+        else:
+            events = [
+                e
+                for e in self._buffer_events
+                if e.sequence_number >= command.sequence_number
+            ]
+            if command.limit is not None:
+                events = events[: command.limit]
+        self._buffer_service.get_characteristic("BufferEventCommand").set_value(
+            to_base64_str(hksv.encode_buffer_events_response(events))
+        )
+
+    def set_recording_publishing_point(self, value):
+        """Handle a write to Camera Recording Publishing Point (spec 4.13)."""
+        self._publishing_point = hksv.PublishingPoint.decode(base64_to_bytes(value))
+        self.publishing_point_updated(self._publishing_point)
+
+    def buffer_upload(self, command):  # pylint: disable=unused-argument
+        """Upload a clip from the buffer; return the clip id. Override."""
+        return 0
+
+    def buffer_activity(self, command):
+        """Apply a should-record window to the buffer. Override."""
+
+    def publishing_point_updated(self, point):
+        """React to a new CMAF publishing point (URL + server CAs). Override."""
 
     async def _start_stream(self, objs, reconfigure):  # pylint: disable=unused-argument
         """Start or reconfigure video streaming for the given session.
