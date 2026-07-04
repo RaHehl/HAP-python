@@ -316,3 +316,11 @@ def test_long_value_fragmentation_roundtrip():
         sdp_offer=sdp,
     )
     assert hksv.WebRTCSolicitOfferResponse.decode(response.encode()).sdp_offer == sdp
+
+
+def test_rtp_streaming_control_unknown_command_passthrough():
+    """Undocumented controller commands (iOS 0x00 status poll) decode raw."""
+    raw = tlv.encode(b"\x01", UUID(int=7).bytes, b"\x02", b"\x00")
+    decoded = hksv.RTPStreamingControlWrite.decode(raw)
+    assert decoded.command == 0
+    assert not isinstance(decoded.command, hksv.RTPStreamingCommand)

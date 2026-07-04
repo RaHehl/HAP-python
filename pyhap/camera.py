@@ -25,10 +25,10 @@ import struct
 import sys
 from uuid import UUID
 
-from pyhap import RESOURCE_DIR, tlv
+from pyhap import RESOURCE_DIR, hksv, tlv
 from pyhap.accessory import Accessory
 from pyhap.const import CATEGORY_CAMERA
-from pyhap.util import byte_bool, to_base64_str
+from pyhap.util import base64_to_bytes, byte_bool, to_base64_str
 
 if sys.version_info >= (3, 11):
     from asyncio import timeout as async_timeout
@@ -224,122 +224,10 @@ NO_SRTP = b"\x01\x01\x02\x02\x00\x03\x00"
 # ---------------------------------------------------------------------------
 
 #: Camera Capabilities characteristic (spec 4.5).
-CAMERA_CAPABILITIES_TYPES = {
-    "VERSION": b"\x01",
-    "CAMERA_SENSORS": b"\x02",
-}
-
-CAMERA_SENSORS_TYPES = {
-    "CAMERA_SENSORS": b"\x01",
-}
-
-SENSOR_CONFIG_TYPES = {
-    "SENSOR_DIMENSIONS": b"\x01",
-    "SENSOR_UUID": b"\x02",
-    "SENSOR_TYPE": b"\x03",
-    "SENSOR_INTENT": b"\x04",
-    "VIDEO_STREAM_CAPABILITIES": b"\x05",
-}
-
-SENSOR_TYPE = {"UNKNOWN": b"\x00", "PRIMARY": b"\x01", "GENERIC": b"\xff"}
-SENSOR_INTENT = {"UNKNOWN": b"\x00", "MAIN": b"\x01", "PACKAGE": b"\x02", "GENERIC": b"\xff"}
-
-SENSOR_DIMENSIONS_TYPES = {"WIDTH": b"\x01", "HEIGHT": b"\x02"}
-
-VIDEO_STREAM_CAPABILITIES_TYPES = {
-    "IDENTIFIER": b"\x01",
-    "VIDEO_QUALITY": b"\x02",
-    "WIDTH": b"\x03",
-    "HEIGHT": b"\x04",
-    "FRAMES_PER_SECOND": b"\x05",
-    "AVERAGE_BIT_RATE": b"\x06",
-    "PEAK_BIT_RATE": b"\x07",
-}
-
-#: Supported Video Stream Tiers characteristic (spec 4.3).
-SUPPORTED_VIDEO_STREAM_TIERS_TYPES = {
-    "CODEC": b"\x01",
-    "PAYLOAD_TYPE": b"\x02",
-    "TIERS": b"\x03",
-}
-
-#: Tier video codec enum (spec 4.3) - NOT the same values as ``VIDEO_CODEC_TYPES``.
-TIER_VIDEO_CODEC_TYPES = {"H264": b"\x01", "H265": b"\x02"}
-
-VIDEO_STREAM_TIER_TYPES = {
-    "IDENTIFIER": b"\x01",
-    "QUALITY": b"\x02",
-    "TARGET_AVERAGE_BITRATE": b"\x03",
-    "WIDTH": b"\x04",
-    "HEIGHT": b"\x05",
-    "FRAME_RATE": b"\x06",
-}
-
-#: Camera Video Quality enum (spec 4.3).
-CAMERA_VIDEO_QUALITY_TYPES = {
-    "HIGHEST": b"\x01",
-    "HIGH": b"\x02",
-    "MEDIUM": b"\x03",
-    "LOW": b"\x04",
-}
-
-#: Supported Audio Stream Tiers characteristic (spec 4.4).
-SUPPORTED_AUDIO_STREAM_TIERS_TYPES = {
-    "CODEC": b"\x01",
-    "PAYLOAD_TYPE": b"\x02",
-    "TIERS": b"\x03",
-}
-
-#: Tier audio codec enum (spec 4.4) - only Opus is defined.
-TIER_AUDIO_CODEC_OPUS = b"\x03"
-
-AUDIO_STREAM_TIER_TYPES = {
-    "IDENTIFIER": b"\x01",
-    "TARGET_AVERAGE_BITRATE": b"\x02",
-    "SAMPLE_RATE": b"\x03",
-    "BIT_DEPTH": b"\x04",
-    "PACKET_TIME": b"\x05",
-    "NUMBER_OF_CHANNELS": b"\x06",
-}
-
-AUDIO_TIER_SAMPLE_RATE = {16: b"\x01", 24: b"\x02", 32: b"\x03", 48: b"\x04"}
-AUDIO_TIER_BIT_DEPTH = {8: b"\x01", 16: b"\x02", 24: b"\x03"}
-
-#: RTP Streaming Control characteristic (spec 4.16).
-RTP_STREAMING_CONTROL_TYPES = {
-    "SESSION_IDENTIFIER": b"\x01",
-    "COMMAND": b"\x02",
-    "VIDEO_TIER": b"\x03",
-    "VIDEO_SSRC": b"\x04",
-    "AUDIO_TIER": b"\x05",
-    "AUDIO_SSRC": b"\x06",
-}
-
-RTP_STREAMING_COMMAND = {"END": b"\x01", "START": b"\x02"}
-
-#: RTP Streaming Control read-back (Write Response) format (spec 4.16).
-RTP_STREAMING_CONTROL_RESPONSE_TYPES = {
-    "SESSION_IDENTIFIER": b"\x01",
-    "STATUS": b"\x02",
-}
-
-RTP_STREAMING_CONTROL_STATUS = {
-    "SUCCESS": b"\x00",
-    "UNKNOWN_SESSION": b"\x01",
-    "NO_SUCH_STREAM": b"\x02",
-    "BUSY": b"\x03",
-    "ERROR": b"\x04",
-}
-
-#: Version string for the Camera Capabilities / Camera Motion Zones services.
 CAMERA_CAPABILITIES_SERVICE_VERSION = "17.99"
 
-#: HAP TLV8 list separator: a zero-length TLV of type 0. Items of a repeated
-#: TLV list are encoded as a single field whose value is the item sub-TLVs
-#: joined by this separator (controllers overwrite duplicate top-level types and
-#: split lists on type 0, so emitting one TLV per item would drop all but the
-#: last item).
-TLV_SEPARATOR = b"\x00\x00"
+# Canonical TLV definitions for the 17.99 spec live in pyhap.hksv.
+TLV_SEPARATOR = hksv.TLV_SEPARATOR
 
 
 FFMPEG_CMD = (
@@ -519,31 +407,21 @@ class Camera(Accessory):
         The codec is read from the first tier's ``codec`` (H264/H265, default H265).
         """
         codec = video_tiers[0].get("codec", "H265")
-        tier_items = [
-            tlv.encode(
-                VIDEO_STREAM_TIER_TYPES["IDENTIFIER"],
-                struct.pack("<I", tier["id"]),
-                VIDEO_STREAM_TIER_TYPES["QUALITY"],
-                CAMERA_VIDEO_QUALITY_TYPES[tier["quality"]],
-                VIDEO_STREAM_TIER_TYPES["TARGET_AVERAGE_BITRATE"],
-                struct.pack("<I", tier["avg_bitrate"]),
-                VIDEO_STREAM_TIER_TYPES["WIDTH"],
-                struct.pack("<H", tier["width"]),
-                VIDEO_STREAM_TIER_TYPES["HEIGHT"],
-                struct.pack("<H", tier["height"]),
-                VIDEO_STREAM_TIER_TYPES["FRAME_RATE"],
-                struct.pack("<B", tier["fps"]),
-            )
-            for tier in video_tiers
-        ]
-        value = tlv.encode(
-            SUPPORTED_VIDEO_STREAM_TIERS_TYPES["CODEC"],
-            TIER_VIDEO_CODEC_TYPES[codec],
-            SUPPORTED_VIDEO_STREAM_TIERS_TYPES["PAYLOAD_TYPE"],
-            struct.pack("<B", payload_type),
-            SUPPORTED_VIDEO_STREAM_TIERS_TYPES["TIERS"],
-            TLV_SEPARATOR.join(tier_items),
-        )
+        value = hksv.SupportedVideoStreamTiers(
+            codec=hksv.VideoCodecType[codec],
+            payload_type=payload_type,
+            tiers=[
+                hksv.VideoStreamTier(
+                    identifier=tier["id"],
+                    quality=hksv.VideoQuality[tier["quality"]],
+                    average_bitrate_kbps=tier["avg_bitrate"],
+                    width=tier["width"],
+                    height=tier["height"],
+                    frame_rate=tier["fps"],
+                )
+                for tier in video_tiers
+            ],
+        ).encode()
         return to_base64_str(value)
 
     @staticmethod
@@ -555,31 +433,25 @@ class Camera(Accessory):
         ``sample_rate`` (kHz: 16/24/32/48), ``bit_depth`` (8/16/24), ``packet_time``
         (ms, must be 20) and ``channels`` (must be 1).
         """
-        tier_items = [
-            tlv.encode(
-                AUDIO_STREAM_TIER_TYPES["IDENTIFIER"],
-                struct.pack("<I", tier["id"]),
-                AUDIO_STREAM_TIER_TYPES["TARGET_AVERAGE_BITRATE"],
-                struct.pack("<I", tier["avg_bitrate"]),
-                AUDIO_STREAM_TIER_TYPES["SAMPLE_RATE"],
-                AUDIO_TIER_SAMPLE_RATE[tier.get("sample_rate", 24)],
-                AUDIO_STREAM_TIER_TYPES["BIT_DEPTH"],
-                AUDIO_TIER_BIT_DEPTH[tier.get("bit_depth", 16)],
-                AUDIO_STREAM_TIER_TYPES["PACKET_TIME"],
-                struct.pack("<B", tier.get("packet_time", 20)),
-                AUDIO_STREAM_TIER_TYPES["NUMBER_OF_CHANNELS"],
-                struct.pack("<B", tier.get("channels", 1)),
-            )
-            for tier in audio_tiers
-        ]
-        value = tlv.encode(
-            SUPPORTED_AUDIO_STREAM_TIERS_TYPES["CODEC"],
-            TIER_AUDIO_CODEC_OPUS,
-            SUPPORTED_AUDIO_STREAM_TIERS_TYPES["PAYLOAD_TYPE"],
-            struct.pack("<B", payload_type),
-            SUPPORTED_AUDIO_STREAM_TIERS_TYPES["TIERS"],
-            TLV_SEPARATOR.join(tier_items),
-        )
+        value = hksv.SupportedAudioStreamTiers(
+            codec=hksv.AudioCodecType.OPUS,
+            payload_type=payload_type,
+            tiers=[
+                hksv.AudioStreamTier(
+                    identifier=tier["id"],
+                    target_average_bitrate=tier["avg_bitrate"],
+                    sample_rate=hksv.AudioSampleRate(
+                        {16: 1, 24: 2, 32: 3, 48: 4}[tier.get("sample_rate", 24)]
+                    ),
+                    bit_depth=hksv.AudioBitDepth(
+                        {8: 1, 16: 2, 24: 3}[tier.get("bit_depth", 16)]
+                    ),
+                    packet_time_ms=tier.get("packet_time", 20),
+                    number_of_channels=tier.get("channels", 1),
+                )
+                for tier in audio_tiers
+            ],
+        ).encode()
         return to_base64_str(value)
 
     @staticmethod
@@ -591,57 +463,28 @@ class Camera(Accessory):
         a list of dicts (``id`` 16 raw bytes, ``quality``, ``width``, ``height``,
         ``fps``, ``avg_bitrate`` kbps, ``peak_bitrate`` kbps).
         """
-        sensor_items = []
-        for sensor in sensors:
-            dims = tlv.encode(
-                SENSOR_DIMENSIONS_TYPES["WIDTH"],
-                struct.pack("<H", sensor["width"]),
-                SENSOR_DIMENSIONS_TYPES["HEIGHT"],
-                struct.pack("<H", sensor["height"]),
-            )
-            cap_items = [
-                tlv.encode(
-                    VIDEO_STREAM_CAPABILITIES_TYPES["IDENTIFIER"],
-                    cap["id"],
-                    VIDEO_STREAM_CAPABILITIES_TYPES["VIDEO_QUALITY"],
-                    CAMERA_VIDEO_QUALITY_TYPES[cap["quality"]],
-                    VIDEO_STREAM_CAPABILITIES_TYPES["WIDTH"],
-                    struct.pack("<H", cap["width"]),
-                    VIDEO_STREAM_CAPABILITIES_TYPES["HEIGHT"],
-                    struct.pack("<H", cap["height"]),
-                    VIDEO_STREAM_CAPABILITIES_TYPES["FRAMES_PER_SECOND"],
-                    struct.pack("<B", cap["fps"]),
-                    VIDEO_STREAM_CAPABILITIES_TYPES["AVERAGE_BIT_RATE"],
-                    struct.pack("<I", cap["avg_bitrate"]),
-                    VIDEO_STREAM_CAPABILITIES_TYPES["PEAK_BIT_RATE"],
-                    struct.pack("<I", cap["peak_bitrate"]),
+        value = hksv.CameraCapabilities(
+            sensors=[
+                hksv.SensorConfiguration(
+                    width=sensor["width"],
+                    height=sensor["height"],
+                    sensor_uuid=sensor["uuid"],
+                    video_stream_capabilities=[
+                        hksv.VideoStreamCapability(
+                            identifier=cap["id"],
+                            video_quality=hksv.VideoQuality[cap["quality"]],
+                            width=cap["width"],
+                            height=cap["height"],
+                            frames_per_second=cap["fps"],
+                            average_bit_rate_kbps=cap["avg_bitrate"],
+                            peak_bit_rate_kbps=cap["peak_bitrate"],
+                        )
+                        for cap in sensor["video_caps"]
+                    ],
                 )
-                for cap in sensor["video_caps"]
+                for sensor in sensors
             ]
-            sensor_items.append(
-                tlv.encode(
-                    SENSOR_CONFIG_TYPES["SENSOR_DIMENSIONS"],
-                    dims,
-                    SENSOR_CONFIG_TYPES["SENSOR_UUID"],
-                    sensor["uuid"],
-                    SENSOR_CONFIG_TYPES["SENSOR_TYPE"],
-                    SENSOR_TYPE["PRIMARY"],
-                    SENSOR_CONFIG_TYPES["SENSOR_INTENT"],
-                    SENSOR_INTENT["MAIN"],
-                    SENSOR_CONFIG_TYPES["VIDEO_STREAM_CAPABILITIES"],
-                    TLV_SEPARATOR.join(cap_items),
-                )
-            )
-
-        camera_sensors = tlv.encode(
-            CAMERA_SENSORS_TYPES["CAMERA_SENSORS"], TLV_SEPARATOR.join(sensor_items)
-        )
-        value = tlv.encode(
-            CAMERA_CAPABILITIES_TYPES["VERSION"],
-            struct.pack("<B", 1),
-            CAMERA_CAPABILITIES_TYPES["CAMERA_SENSORS"],
-            camera_sensors,
-        )
+        ).encode()
         return to_base64_str(value)
 
     def __init__(self, options, *args, **kwargs):
@@ -868,40 +711,34 @@ class Camera(Accessory):
         Setup Endpoints) and a video/audio tier identifier. The same characteristic
         is then read back for the command status (Write Response).
         """
-        logger.info("==> iOS WROTE RTP Streaming Control (multi-tier/HEVC path)")
-        objs = tlv.decode(value, from_base64=True)
-        session_id_bytes = objs.get(RTP_STREAMING_CONTROL_TYPES["SESSION_IDENTIFIER"])
-        command = objs.get(RTP_STREAMING_CONTROL_TYPES["COMMAND"])
-        if session_id_bytes is None or command is None:
+        try:
+            control = hksv.RTPStreamingControlWrite.decode(base64_to_bytes(value))
+        except (KeyError, ValueError):
             logger.error("Bad RTP Streaming Control write")
             return
-
-        session_id = UUID(bytes=session_id_bytes)
-        status = RTP_STREAMING_CONTROL_STATUS["SUCCESS"]
+        session_id = UUID(bytes=control.session_identifier)
+        status = hksv.RTPStreamingStatus.SUCCESS
 
         session_info = self.sessions.get(session_id)
 
-        if command == RTP_STREAMING_COMMAND["START"]:
+        if control.command == hksv.RTPStreamingCommand.START:
             if session_info is None:
-                status = RTP_STREAMING_CONTROL_STATUS["UNKNOWN_SESSION"]
+                status = hksv.RTPStreamingStatus.UNKNOWN_SESSION_IDENTIFIER
             elif session_info.get("tier_streaming"):
                 # Already streaming for this session - idempotent ack, don't
-                # spawn a second ffmpeg (iOS may repeat START).
-                status = RTP_STREAMING_CONTROL_STATUS["SUCCESS"]
+                # spawn a second encoder (iOS may repeat START).
+                status = hksv.RTPStreamingStatus.SUCCESS
             else:
-                video_tier_id = int.from_bytes(
-                    objs[RTP_STREAMING_CONTROL_TYPES["VIDEO_TIER"]], "little"
-                )
-                tier = self._video_tiers.get(video_tier_id)
+                tier = self._video_tiers.get(control.video_tier)
                 if tier is None:
-                    status = RTP_STREAMING_CONTROL_STATUS["NO_SUCH_STREAM"]
+                    status = hksv.RTPStreamingStatus.NO_SUCH_STREAM
                 else:
                     session_info["tier_streaming"] = True
-                    self._start_tier_stream(session_info, objs, tier)
+                    self._start_tier_stream(session_info, control, tier)
 
-        elif command == RTP_STREAMING_COMMAND["END"]:
+        elif control.command == hksv.RTPStreamingCommand.END:
             if session_info is None or not session_info.get("tier_streaming"):
-                status = RTP_STREAMING_CONTROL_STATUS["NO_SUCH_STREAM"]
+                status = hksv.RTPStreamingStatus.NO_SUCH_STREAM
             else:
                 self.driver.add_job(self._stop_tier_stream, session_id)
         else:
@@ -909,42 +746,27 @@ class Camera(Accessory):
             # session's current health rather than ERROR, which iOS reads as a
             # failed stream and tears the session down.
             if session_info is None:
-                status = RTP_STREAMING_CONTROL_STATUS["UNKNOWN_SESSION"]
+                status = hksv.RTPStreamingStatus.UNKNOWN_SESSION_IDENTIFIER
             else:
-                status = RTP_STREAMING_CONTROL_STATUS["SUCCESS"]
+                status = hksv.RTPStreamingStatus.SUCCESS
 
-        response = tlv.encode(
-            RTP_STREAMING_CONTROL_RESPONSE_TYPES["SESSION_IDENTIFIER"],
-            session_id_bytes,
-            RTP_STREAMING_CONTROL_RESPONSE_TYPES["STATUS"],
-            status,
-            to_base64=True,
+        response = to_base64_str(
+            hksv.encode_rtp_streaming_status(control.session_identifier, status)
         )
         self._management[self._multi_tier_idx].get_characteristic(
             "RTPStreamingControl"
         ).set_value(response)
 
-    def _start_tier_stream(self, session_info, objs, tier):
+    def _start_tier_stream(self, session_info, control, tier):
         """Resolve a tier to encoder parameters and start the stream."""
         opts = dict(session_info)
-        # Tier ids and SSRCs are HAP integers: little-endian, minimal length
-        # (iOS sends a tier id as a single byte, not a fixed uint32).
-        opts["v_ssrc"] = int.from_bytes(
-            objs[RTP_STREAMING_CONTROL_TYPES["VIDEO_SSRC"]], "little"
-        )
-        if RTP_STREAMING_CONTROL_TYPES["AUDIO_SSRC"] in objs:
-            opts["a_ssrc"] = int.from_bytes(
-                objs[RTP_STREAMING_CONTROL_TYPES["AUDIO_SSRC"]], "little"
-            )
+        opts["v_ssrc"] = control.video_ssrc
+        if control.audio_ssrc is not None:
+            opts["a_ssrc"] = control.audio_ssrc
 
         # Resolve the audio tier (audio parameters are advertised up-front in the
         # new model rather than negotiated per-session like the legacy path).
-        audio_tier_id = None
-        if RTP_STREAMING_CONTROL_TYPES["AUDIO_TIER"] in objs:
-            audio_tier_id = int.from_bytes(
-                objs[RTP_STREAMING_CONTROL_TYPES["AUDIO_TIER"]], "little"
-            )
-        audio_tier = self._audio_tiers.get(audio_tier_id) or next(
+        audio_tier = self._audio_tiers.get(control.audio_tier) or next(
             iter(self._audio_tiers.values()), None
         )
         if audio_tier:

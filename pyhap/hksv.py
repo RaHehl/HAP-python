@@ -685,9 +685,16 @@ class RTPStreamingControlWrite:
     @classmethod
     def decode(cls, data: bytes) -> "RTPStreamingControlWrite":
         d = _decode(data)
+        raw_command = _int(d[2])
+        try:
+            command = RTPStreamingCommand(raw_command)
+        except ValueError:
+            # Controllers send undocumented commands (e.g. a 0x00 status poll);
+            # surface them raw so callers can answer instead of erroring.
+            command = raw_command
         return cls(
             session_identifier=d[1],
-            command=RTPStreamingCommand(_int(d[2])),
+            command=command,
             video_tier=_int(d[3]) if 3 in d else None,
             video_ssrc=_int(d[4]) if 4 in d else None,
             audio_tier=_int(d[5]) if 5 in d else None,
