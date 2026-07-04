@@ -795,6 +795,13 @@ class Camera(Accessory):
         operating_mode.configure_char("StreamingEnabled", value=True)
         operating_mode.configure_char("CameraOperatingModeIndicator", value=False)
 
+        # Declare HKSV recording explicitly OFF so the controller does not try to
+        # build a clip library (which loops on CameraClipsLibraryError.noZoneName
+        # when the recording services aren't implemented).
+        recording = self.add_preload_service("CameraRecordingManagement")
+        recording.configure_char("Active", value=0)
+        recording.configure_char("RecordingAudioActive", value=0)
+
         management = self.add_preload_service("CameraMultiTierRTPStreamManagement")
         management.configure_char("StreamingEnabled", value=True)
         self._status_active_char = management.configure_char("StatusActive", value=True)
@@ -872,28 +879,39 @@ class Camera(Accessory):
         session_id = UUID(bytes=session_id_bytes)
         status = RTP_STREAMING_CONTROL_STATUS["SUCCESS"]
 
+        session_info = self.sessions.get(session_id)
+
         if command == RTP_STREAMING_COMMAND["START"]:
-            session_info = self.sessions.get(session_id)
             if session_info is None:
                 status = RTP_STREAMING_CONTROL_STATUS["UNKNOWN_SESSION"]
+            elif session_info.get("tier_streaming"):
+                # Already streaming for this session - idempotent ack, don't
+                # spawn a second ffmpeg (iOS may repeat START).
+                status = RTP_STREAMING_CONTROL_STATUS["SUCCESS"]
             else:
-                video_tier_id = struct.unpack(
-                    "<I", objs[RTP_STREAMING_CONTROL_TYPES["VIDEO_TIER"]]
-                )[0]
+                video_tier_id = int.from_bytes(
+                    objs[RTP_STREAMING_CONTROL_TYPES["VIDEO_TIER"]], "little"
+                )
                 tier = self._video_tiers.get(video_tier_id)
                 if tier is None:
                     status = RTP_STREAMING_CONTROL_STATUS["NO_SUCH_STREAM"]
                 else:
+                    session_info["tier_streaming"] = True
                     self._start_tier_stream(session_info, objs, tier)
 
         elif command == RTP_STREAMING_COMMAND["END"]:
-            session_info = self.sessions.get(session_id)
-            if session_info is None:
+            if session_info is None or not session_info.get("tier_streaming"):
                 status = RTP_STREAMING_CONTROL_STATUS["NO_SUCH_STREAM"]
             else:
                 self.driver.add_job(self._stop_tier_stream, session_id)
         else:
-            status = RTP_STREAMING_CONTROL_STATUS["ERROR"]
+            # Other commands (e.g. iOS's 0x00 status poll / keepalive): report the
+            # session's current health rather than ERROR, which iOS reads as a
+            # failed stream and tears the session down.
+            if session_info is None:
+                status = RTP_STREAMING_CONTROL_STATUS["UNKNOWN_SESSION"]
+            else:
+                status = RTP_STREAMING_CONTROL_STATUS["SUCCESS"]
 
         response = tlv.encode(
             RTP_STREAMING_CONTROL_RESPONSE_TYPES["SESSION_IDENTIFIER"],
@@ -909,21 +927,23 @@ class Camera(Accessory):
     def _start_tier_stream(self, session_info, objs, tier):
         """Resolve a tier to encoder parameters and start the stream."""
         opts = dict(session_info)
-        opts["v_ssrc"] = struct.unpack(
-            "<I", objs[RTP_STREAMING_CONTROL_TYPES["VIDEO_SSRC"]]
-        )[0]
+        # Tier ids and SSRCs are HAP integers: little-endian, minimal length
+        # (iOS sends a tier id as a single byte, not a fixed uint32).
+        opts["v_ssrc"] = int.from_bytes(
+            objs[RTP_STREAMING_CONTROL_TYPES["VIDEO_SSRC"]], "little"
+        )
         if RTP_STREAMING_CONTROL_TYPES["AUDIO_SSRC"] in objs:
-            opts["a_ssrc"] = struct.unpack(
-                "<I", objs[RTP_STREAMING_CONTROL_TYPES["AUDIO_SSRC"]]
-            )[0]
+            opts["a_ssrc"] = int.from_bytes(
+                objs[RTP_STREAMING_CONTROL_TYPES["AUDIO_SSRC"]], "little"
+            )
 
         # Resolve the audio tier (audio parameters are advertised up-front in the
         # new model rather than negotiated per-session like the legacy path).
         audio_tier_id = None
         if RTP_STREAMING_CONTROL_TYPES["AUDIO_TIER"] in objs:
-            audio_tier_id = struct.unpack(
-                "<I", objs[RTP_STREAMING_CONTROL_TYPES["AUDIO_TIER"]]
-            )[0]
+            audio_tier_id = int.from_bytes(
+                objs[RTP_STREAMING_CONTROL_TYPES["AUDIO_TIER"]], "little"
+            )
         audio_tier = self._audio_tiers.get(audio_tier_id) or next(
             iter(self._audio_tiers.values()), None
         )
