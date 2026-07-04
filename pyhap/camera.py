@@ -570,6 +570,11 @@ class Camera(Accessory):
             self._audio_tiers = {t["id"]: t for t in options.get("audio_tiers", [])}
             self._status_active_char = None
             self._setup_multi_tier_management(options)
+        self._webrtc_sessions = {}
+        self._webrtc_service = None
+        self._webrtc_active_sessions_char = None
+        if options.get("webrtc"):
+            self._setup_webrtc_management(options)
 
     @property
     def streaming_status(self):
@@ -673,6 +678,7 @@ class Camera(Accessory):
             "RTPStreamingControl",
             setter_callback=lambda value: self.set_rtp_streaming_control(value),
         )
+        management.configure_char("SensorUUID", value=to_base64_str(sensors[0]["uuid"]))
         self._management.append(management)
         self._streaming_status.append(STREAMING_STATUS["AVAILABLE"])
 
@@ -801,6 +807,185 @@ class Camera(Accessory):
             return
         await self.stop_stream(session_info)
         self._streaming_status[session_info["stream_idx"]] = STREAMING_STATUS["AVAILABLE"]
+
+    def _setup_webrtc_management(self, options):
+        """Create the Camera WebRTC Stream Management service (spec 3.7).
+
+        The signaling chars are wired to a session registry; the actual WebRTC
+        stack is supplied by overriding the ``webrtc_*`` hooks.
+        """
+        sensors = options.get("sensors") or self._default_sensors(options)
+        service = self.add_preload_service("CameraWebRTCStreamManagement")
+        service.configure_char("StreamingEnabled", value=True)
+        service.configure_char(
+            "WebRTCSupportedVideoStreamTiers",
+            value=self.get_supported_video_stream_tiers(options["video_tiers"]),
+        )
+        service.configure_char(
+            "WebRTCSupportedAudioStreamTiers",
+            value=self.get_supported_audio_stream_tiers(
+                options.get("audio_tiers")
+                or [{"id": 1, "avg_bitrate": 24000, "sample_rate": 24}]
+            ),
+        )
+        service.configure_char("SensorUUID", value=to_base64_str(sensors[0]["uuid"]))
+        self._webrtc_active_sessions_char = service.configure_char(
+            "WebRTCNumberOfActiveSessions", value=0
+        )
+        service.configure_char(
+            "WebRTCSolicitOffer", setter_callback=self.set_webrtc_solicit_offer
+        )
+        service.configure_char(
+            "WebRTCProvideAnswer", setter_callback=self.set_webrtc_provide_answer
+        )
+        service.configure_char(
+            "WebRTCStreamingControl",
+            setter_callback=self.set_webrtc_streaming_control,
+        )
+        service.configure_char(
+            "WebRTCReoffer", setter_callback=self.set_webrtc_reoffer
+        )
+        service.configure_char(
+            "WebRTCUpdateSession", setter_callback=self.set_webrtc_update_session
+        )
+        self._webrtc_service = service
+
+    def _webrtc_respond(self, char_name, response):
+        self._webrtc_service.get_characteristic(char_name).set_value(
+            to_base64_str(response)
+        )
+
+    def _webrtc_update_active_sessions(self):
+        active = sum(
+            1 for s in self._webrtc_sessions.values() if s.get("state") == "active"
+        )
+        self._webrtc_active_sessions_char.set_value(active)
+
+    def set_webrtc_solicit_offer(self, value):
+        """Handle a write to WebRTC Solicit Offer (spec 4.17)."""
+        write = hksv.WebRTCSolicitOfferWrite.decode(base64_to_bytes(value))
+        offer = self.webrtc_create_offer(write.sframe_enabled)
+        if isinstance(offer, hksv.WebRTCOfferStatus):
+            response = hksv.WebRTCSolicitOfferResponse(
+                session_identifier=b"\x00" * 16, status=offer
+            )
+        elif offer is None:
+            response = hksv.WebRTCSolicitOfferResponse(
+                session_identifier=b"\x00" * 16,
+                status=hksv.WebRTCOfferStatus.ERROR,
+            )
+        else:
+            self._webrtc_sessions[offer.session_identifier] = {"state": "offered"}
+            response = offer
+        self._webrtc_respond("WebRTCSolicitOffer", response.encode())
+
+    def set_webrtc_provide_answer(self, value):
+        """Handle a write to WebRTC Provide Answer (spec 4.18)."""
+        write = hksv.WebRTCProvideAnswerWrite.decode(base64_to_bytes(value))
+        session = self._webrtc_sessions.get(write.session_identifier)
+        if session is None:
+            status = hksv.WebRTCStreamingStatus.UNKNOWN_SESSION_IDENTIFIER
+        elif self.webrtc_apply_answer(
+            write.session_identifier, write.sdp_answer, write.additional_candidates
+        ):
+            session["state"] = "active"
+            self._webrtc_update_active_sessions()
+            status = hksv.WebRTCStreamingStatus.SUCCESS
+        else:
+            status = hksv.WebRTCStreamingStatus.ERROR
+        self._webrtc_respond(
+            "WebRTCProvideAnswer",
+            hksv.encode_webrtc_status(write.session_identifier, status),
+        )
+
+    def set_webrtc_streaming_control(self, value):
+        """Handle a write to WebRTC Streaming Control (spec 4.19): End a session."""
+        d = hksv._decode(base64_to_bytes(value))
+        session_identifier = d[1]
+        if self._webrtc_sessions.pop(session_identifier, None) is None:
+            status = hksv.WebRTCStreamingStatus.UNKNOWN_SESSION_IDENTIFIER
+        else:
+            self.webrtc_end_session(session_identifier)
+            self._webrtc_update_active_sessions()
+            status = hksv.WebRTCStreamingStatus.SUCCESS
+        self._webrtc_respond(
+            "WebRTCStreamingControl",
+            hksv.encode_webrtc_status(session_identifier, status),
+        )
+
+    def set_webrtc_reoffer(self, value):
+        """Handle a write to WebRTC Reoffer (spec 4.21)."""
+        write = hksv.WebRTCReofferWrite.decode(base64_to_bytes(value))
+        session = self._webrtc_sessions.get(write.session_identifier)
+        result = None
+        if session is not None:
+            result = self.webrtc_reoffer(
+                write.session_identifier, write.sdp_offer, write.sframe_enabled
+            )
+        if session is None:
+            response = hksv.WebRTCReofferResponse(
+                session_identifier=write.session_identifier,
+                sdp_answer="",
+                status=hksv.WebRTCStreamingStatus.UNKNOWN_SESSION_IDENTIFIER,
+            )
+        elif result is None:
+            response = hksv.WebRTCReofferResponse(
+                session_identifier=write.session_identifier,
+                sdp_answer="",
+                status=hksv.WebRTCStreamingStatus.ERROR,
+            )
+        else:
+            sdp_answer, sframe_configuration = result
+            response = hksv.WebRTCReofferResponse(
+                session_identifier=write.session_identifier,
+                sdp_answer=sdp_answer,
+                status=hksv.WebRTCStreamingStatus.SUCCESS,
+                sframe_configuration=sframe_configuration,
+            )
+        self._webrtc_respond("WebRTCReoffer", response.encode())
+
+    def set_webrtc_update_session(self, value):
+        """Handle a write to WebRTC Update Session (spec 4.22): SFrame key updates."""
+        write = hksv.WebRTCUpdateSessionWrite.decode(base64_to_bytes(value))
+        if write.session_identifier not in self._webrtc_sessions:
+            status = hksv.WebRTCStreamingStatus.UNKNOWN_SESSION_IDENTIFIER
+        elif self.webrtc_update_session(
+            write.session_identifier,
+            write.receive_keys_to_add,
+            write.receive_kids_to_remove,
+        ):
+            status = hksv.WebRTCStreamingStatus.SUCCESS
+        else:
+            status = hksv.WebRTCStreamingStatus.ERROR
+        self._webrtc_respond(
+            "WebRTCUpdateSession",
+            hksv.encode_webrtc_status(write.session_identifier, status),
+        )
+
+    def webrtc_create_offer(self, sframe_enabled):
+        """Produce a WebRTC offer for a new session.
+
+        Override to return a :class:`pyhap.hksv.WebRTCSolicitOfferResponse` with a
+        fresh session identifier, the SDP offer and optional ICE candidates /
+        SFrame configuration. Return a :class:`pyhap.hksv.WebRTCOfferStatus` for a
+        gated state (e.g. privacy mode) or ``None`` when no stack is available.
+        """
+        return None
+
+    def webrtc_apply_answer(self, session_identifier, sdp_answer, candidates):
+        """Apply the controller's SDP answer; return success. Override."""
+        return False
+
+    def webrtc_reoffer(self, session_identifier, sdp_offer, sframe_enabled):
+        """Renegotiate a session; return ``(sdp_answer, sframe_config)``. Override."""
+        return None
+
+    def webrtc_update_session(self, session_identifier, keys_to_add, kids_to_remove):
+        """Apply SFrame receive-key updates; return success. Override."""
+        return False
+
+    def webrtc_end_session(self, session_identifier):
+        """Tear down a session's WebRTC resources. Override."""
 
     async def _start_stream(self, objs, reconfigure):  # pylint: disable=unused-argument
         """Start or reconfigure video streaming for the given session.

@@ -205,3 +205,204 @@ def test_rtp_streaming_control_keepalive_reports_health(multi_tier_camera):
     camera.set_rtp_streaming_control(poll)
     _, status = _control_response(camera)
     assert status is hksv.RTPStreamingStatus.SUCCESS
+
+
+@pytest.fixture(name="webrtc_camera")
+def webrtc_camera_fixture():
+    with patch(
+        "pyhap.accessory_driver.AccessoryDriver.persist"
+    ), patch("pyhap.accessory_driver.AccessoryDriver.load"):
+        driver = AccessoryDriver(loop=MagicMock(), listen_address="127.0.0.1")
+        options = {
+            "video": {
+                "codec": {
+                    "profiles": [
+                        camera_module.VIDEO_CODEC_PARAM_PROFILE_ID_TYPES["BASELINE"]
+                    ],
+                    "levels": [camera_module.VIDEO_CODEC_PARAM_LEVEL_TYPES["TYPE3_1"]],
+                },
+                "resolutions": [[640, 360, 15]],
+            },
+            "audio": {"codecs": [{"type": "OPUS", "samplerate": 24}]},
+            "srtp": True,
+            "address": "127.0.0.1",
+            "video_tiers": VIDEO_TIERS,
+            "audio_tiers": AUDIO_TIERS,
+            "webrtc": True,
+        }
+        yield Camera(options, driver, "Cam")
+
+
+def _webrtc_response(camera, char_name, decoder):
+    value = (
+        camera.get_service("CameraWebRTCStreamManagement")
+        .get_characteristic(char_name)
+        .get_value()
+    )
+    return decoder(base64_to_bytes(value))
+
+
+def test_webrtc_service_setup(webrtc_camera):
+    camera = webrtc_camera
+    service = camera.get_service("CameraWebRTCStreamManagement")
+    assert service.get_characteristic("StreamingEnabled").get_value() is True
+    assert (
+        service.get_characteristic("WebRTCSupportedVideoStreamTiers").get_value()
+        == GOLDEN_VIDEO_TIERS
+    )
+    assert service.get_characteristic("WebRTCNumberOfActiveSessions").get_value() == 0
+
+
+def test_webrtc_solicit_offer_without_stack_errors(webrtc_camera):
+    camera = webrtc_camera
+    write = to_base64_str(hksv.WebRTCSolicitOfferWrite().encode())
+    camera.set_webrtc_solicit_offer(write)
+    response = _webrtc_response(
+        camera, "WebRTCSolicitOffer", hksv.WebRTCSolicitOfferResponse.decode
+    )
+    assert response.status is hksv.WebRTCOfferStatus.ERROR
+    assert not camera._webrtc_sessions
+
+
+def test_webrtc_solicit_offer_privacy_mode(webrtc_camera):
+    camera = webrtc_camera
+    camera.webrtc_create_offer = (
+        lambda sframe_enabled: hksv.WebRTCOfferStatus.PRIVACY_MODE_ACTIVE
+    )
+    camera.set_webrtc_solicit_offer(
+        to_base64_str(hksv.WebRTCSolicitOfferWrite().encode())
+    )
+    response = _webrtc_response(
+        camera, "WebRTCSolicitOffer", hksv.WebRTCSolicitOfferResponse.decode
+    )
+    assert response.status is hksv.WebRTCOfferStatus.PRIVACY_MODE_ACTIVE
+
+
+def test_webrtc_full_session_lifecycle(webrtc_camera):
+    camera = webrtc_camera
+    session_id = UUID(int=21).bytes
+    camera.webrtc_create_offer = lambda sframe_enabled: (
+        hksv.WebRTCSolicitOfferResponse(
+            session_identifier=session_id,
+            status=hksv.WebRTCOfferStatus.SUCCESS,
+            sdp_offer="v=0\r\n",
+            sframe_configuration=(
+                hksv.SFrameKeyData(key=b"\x01" * 16, kid=1) if sframe_enabled else None
+            ),
+        )
+    )
+    camera.webrtc_apply_answer = lambda sid, answer, candidates: True
+    camera.webrtc_update_session = lambda sid, add, remove: True
+    ended = []
+    camera.webrtc_end_session = ended.append
+
+    # Solicit (with SFrame)
+    camera.set_webrtc_solicit_offer(
+        to_base64_str(hksv.WebRTCSolicitOfferWrite(sframe_enabled=True).encode())
+    )
+    offer = _webrtc_response(
+        camera, "WebRTCSolicitOffer", hksv.WebRTCSolicitOfferResponse.decode
+    )
+    assert offer.status is hksv.WebRTCOfferStatus.SUCCESS
+    assert offer.sframe_configuration.kid == 1
+    assert camera._webrtc_sessions[session_id]["state"] == "offered"
+
+    # Provide answer -> active, session count notifies 1
+    camera.set_webrtc_provide_answer(
+        to_base64_str(
+            hksv.WebRTCProvideAnswerWrite(
+                session_identifier=session_id, sdp_answer="v=0\r\n"
+            ).encode()
+        )
+    )
+    _, status = _webrtc_response(
+        camera, "WebRTCProvideAnswer", hksv.decode_webrtc_status
+    )
+    assert status is hksv.WebRTCStreamingStatus.SUCCESS
+    service = camera.get_service("CameraWebRTCStreamManagement")
+    assert service.get_characteristic("WebRTCNumberOfActiveSessions").get_value() == 1
+
+    # SFrame key update
+    camera.set_webrtc_update_session(
+        to_base64_str(
+            hksv.WebRTCUpdateSessionWrite(
+                session_identifier=session_id,
+                receive_keys_to_add=[hksv.SFrameKeyData(key=b"\x02" * 16, kid=2)],
+            ).encode()
+        )
+    )
+    _, status = _webrtc_response(
+        camera, "WebRTCUpdateSession", hksv.decode_webrtc_status
+    )
+    assert status is hksv.WebRTCStreamingStatus.SUCCESS
+
+    # End -> teardown hook, count back to 0
+    camera.set_webrtc_streaming_control(
+        to_base64_str(
+            hksv.tlv.encode(b"\x01", session_id, b"\x02", b"\x01")
+        )
+    )
+    _, status = _webrtc_response(
+        camera, "WebRTCStreamingControl", hksv.decode_webrtc_status
+    )
+    assert status is hksv.WebRTCStreamingStatus.SUCCESS
+    assert ended == [session_id]
+    assert service.get_characteristic("WebRTCNumberOfActiveSessions").get_value() == 0
+    assert not camera._webrtc_sessions
+
+
+def test_webrtc_unknown_session_paths(webrtc_camera):
+    camera = webrtc_camera
+    unknown = UUID(int=99).bytes
+
+    camera.set_webrtc_provide_answer(
+        to_base64_str(
+            hksv.WebRTCProvideAnswerWrite(
+                session_identifier=unknown, sdp_answer="v=0\r\n"
+            ).encode()
+        )
+    )
+    _, status = _webrtc_response(
+        camera, "WebRTCProvideAnswer", hksv.decode_webrtc_status
+    )
+    assert status is hksv.WebRTCStreamingStatus.UNKNOWN_SESSION_IDENTIFIER
+
+    camera.set_webrtc_streaming_control(
+        to_base64_str(hksv.tlv.encode(b"\x01", unknown, b"\x02", b"\x01"))
+    )
+    _, status = _webrtc_response(
+        camera, "WebRTCStreamingControl", hksv.decode_webrtc_status
+    )
+    assert status is hksv.WebRTCStreamingStatus.UNKNOWN_SESSION_IDENTIFIER
+
+    camera.set_webrtc_reoffer(
+        to_base64_str(
+            hksv.WebRTCReofferWrite(
+                session_identifier=unknown, sdp_offer="v=0\r\n"
+            ).encode()
+        )
+    )
+    reoffer = _webrtc_response(
+        camera, "WebRTCReoffer", hksv.WebRTCReofferResponse.decode
+    )
+    assert reoffer.status is hksv.WebRTCStreamingStatus.UNKNOWN_SESSION_IDENTIFIER
+
+
+def test_webrtc_reoffer_success(webrtc_camera):
+    camera = webrtc_camera
+    session_id = UUID(int=5).bytes
+    camera._webrtc_sessions[session_id] = {"state": "active"}
+    camera.webrtc_reoffer = lambda sid, offer, sframe: ("v=0\r\nanswer", None)
+
+    camera.set_webrtc_reoffer(
+        to_base64_str(
+            hksv.WebRTCReofferWrite(
+                session_identifier=session_id, sdp_offer="v=0\r\n"
+            ).encode()
+        )
+    )
+    reoffer = _webrtc_response(
+        camera, "WebRTCReoffer", hksv.WebRTCReofferResponse.decode
+    )
+    assert reoffer.status is hksv.WebRTCStreamingStatus.SUCCESS
+    assert reoffer.sdp_answer == "v=0\r\nanswer"

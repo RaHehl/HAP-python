@@ -893,6 +893,16 @@ class WebRTCReofferResponse:
             args += [b"\x04", self.sframe_configuration.encode()]
         return tlv.encode(*args)
 
+    @classmethod
+    def decode(cls, data: bytes) -> "WebRTCReofferResponse":
+        d = _decode(data)
+        return cls(
+            session_identifier=d[1],
+            sdp_answer=d[2].decode(),
+            status=WebRTCStreamingStatus(_int(d[3])),
+            sframe_configuration=SFrameKeyData.decode(d[4]) if 4 in d else None,
+        )
+
 
 @dataclass
 class WebRTCUpdateSessionWrite:
