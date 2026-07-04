@@ -123,8 +123,9 @@ def new_key_salt() -> bytes:
 
 
 def _nonce(counter: int) -> bytes:
-    # 64-bit little-endian counter, right-justified into a 96-bit nonce.
-    return b"\x00\x00\x00\x00" + struct.pack("<Q", counter)
+    # 96-bit nonce: 64-bit little-endian counter at offset 0, then four zero
+    # bytes (HDS convention, distinct from the right-justified HAP control nonce).
+    return struct.pack("<Q", counter) + b"\x00\x00\x00\x00"
 
 
 class HDSCrypto:
@@ -145,7 +146,7 @@ class HDSCrypto:
         """Encrypt a payload into a full HDS frame (header + ciphertext + tag)."""
         if len(payload) > _MAX_PAYLOAD_LENGTH:
             raise ValueError("HDS payload too large for a single frame")
-        header = bytes([frame_type]) + len(payload).to_bytes(3, "little")
+        header = bytes([frame_type]) + len(payload).to_bytes(3, "big")
         nonce = _nonce(self._write_count)
         self._write_count += 1
         ciphertext = self._write_cipher.encrypt(nonce, payload, header)
@@ -161,7 +162,7 @@ class HDSCrypto:
         if len(buffer) < _FRAME_HEADER_LENGTH:
             return None
         header = bytes(buffer[:_FRAME_HEADER_LENGTH])
-        payload_length = int.from_bytes(header[1:4], "little")
+        payload_length = int.from_bytes(header[1:4], "big")
         frame_length = _FRAME_HEADER_LENGTH + payload_length + _TAG_LENGTH
         if len(buffer) < frame_length:
             return None
