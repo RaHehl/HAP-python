@@ -573,6 +573,7 @@ class Camera(Accessory):
         self._publishing_point = None
         self._recording_service = None
         self._selected_recording_config = None
+        self._motion_detected_char = None
         self._hds_listener = None
         self._hds_connections = set()
         self._camera_keys = {}
@@ -1245,10 +1246,16 @@ class Camera(Accessory):
         operating_mode.configure_char("EventSnapshotsActive", value=1)
         operating_mode.configure_char("HomeKitCameraActive", value=1)
 
+        # HKSV records on an event trigger; the camera owns a motion sensor and
+        # links it (and the data stream transport) to the recording management.
+        motion = self.add_preload_service("MotionSensor")
+        self._motion_detected_char = motion.configure_char("MotionDetected", value=False)
+
         general, video, audio = self._default_recording_configs(options)
         service = self.add_preload_service(
             "CameraRecordingManagement", chars=["RecordingAudioActive"]
         )
+        service.add_linked_service(motion)
         service.configure_char("Active", value=1 if options.get("recording") else 0)
         service.configure_char(
             "RecordingAudioActive", value=1 if options.get("recording_audio") else 0
@@ -1365,6 +1372,11 @@ class Camera(Accessory):
 
     def recording_configuration_selected(self, configuration):
         """React to the controller selecting a recording configuration. Override."""
+
+    def set_motion_detected(self, detected):
+        """Fire the recording motion trigger (True) or clear it (False)."""
+        if self._motion_detected_char is not None:
+            self._motion_detected_char.set_value(bool(detected))
 
     async def _start_stream(self, objs, reconfigure):  # pylint: disable=unused-argument
         """Start or reconfigure video streaming for the given session.
