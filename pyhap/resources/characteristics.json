@@ -450,7 +450,7 @@
       "minValue": -90,
       "unit": "arcdegrees"
    },
-   "CurrentVisibilityState":{
+   "CurrentVisibilityState": {
       "Format": "uint8",
       "Permissions": [
          "pr",
@@ -590,7 +590,7 @@
       "minValue": 0,
       "unit": "arcdegrees"
    },
-   "InputSourceType":{
+   "InputSourceType": {
       "Format": "uint8",
       "Permissions": [
          "pr",
@@ -611,7 +611,7 @@
          "Application": 10
       }
    },
-   "InputDeviceType":{
+   "InputDeviceType": {
       "Format": "uint8",
       "Permissions": [
          "pr",
@@ -916,7 +916,7 @@
       ],
       "UUID": "00000050-0000-1000-8000-0026BB765291"
    },
-   "PictureMode":{
+   "PictureMode": {
       "Format": "uint8",
       "Permissions": [
          "pr",
@@ -950,7 +950,7 @@
          "Stopped": 2
       }
    },
-   "PowerModeSelection":{
+   "PowerModeSelection": {
       "Format": "uint8",
       "Permissions": [
          "pw"
@@ -1024,7 +1024,7 @@
       "minStep": 1,
       "minValue": 0
    },
-   "RemoteKey":{
+   "RemoteKey": {
       "Format": "uint8",
       "Permissions": [
          "pw"
@@ -1547,7 +1547,7 @@
       "minValue": -90,
       "unit": "arcdegrees"
    },
-   "TargetVisibilityState":{
+   "TargetVisibilityState": {
       "Format": "uint8",
       "Permissions": [
          "pr",
@@ -1778,5 +1778,191 @@
          "wr"
       ],
       "UUID": "00008045-0000-1000-8000-0026BB765291"
+   },
+   "RecordingAudioActive": {
+      "Format": "bool",
+      "Permissions": [
+         "pr",
+         "pw",
+         "ev"
+      ],
+      "UUID": "00000226-0000-1000-8000-0026BB765291"
+   },
+   "MotionEnabled": {
+      "Format": "bool",
+      "Permissions": [
+         "pr",
+         "pw",
+         "ev"
+      ],
+      "UUID": "00008087-0000-1000-8000-0026BB765291"
+   },
+   "ContributingSensors": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00008086-0000-1000-8000-0026BB765291"
+   },
+   "CameraKey": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pw"
+      ],
+      "UUID": "00008051-0000-1000-8000-0026BB765291"
+   },
+   "CameraKeyID": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00008052-0000-1000-8000-0026BB765291"
+   },
+   "BufferUploadCommand": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "wr"
+      ],
+      "UUID": "00008013-0000-1000-8000-0026BB765291"
+   },
+   "BufferActivityCommand": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pw"
+      ],
+      "UUID": "00008017-0000-1000-8000-0026BB765291"
+   },
+   "BufferEventCommand": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "wr"
+      ],
+      "UUID": "00008014-0000-1000-8000-0026BB765291"
+   },
+   "BufferEventSequenceNumber": {
+      "Format": "uint32",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00008015-0000-1000-8000-0026BB765291"
+   },
+   "CameraRecordingPublishingPoint": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw"
+      ],
+      "UUID": "00008016-0000-1000-8000-0026BB765291"
+   },
+   "CameraZones": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw"
+      ],
+      "UUID": "00008022-0000-1000-8000-0026BB765291"
+   },
+   "WebRTCSolicitOffer": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "wr"
+      ],
+      "UUID": "00008053-0000-1000-8000-0026BB765291"
+   },
+   "WebRTCProvideAnswer": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "wr"
+      ],
+      "UUID": "00008054-0000-1000-8000-0026BB765291"
+   },
+   "WebRTCStreamingControl": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "wr"
+      ],
+      "UUID": "00008056-0000-1000-8000-0026BB765291"
+   },
+   "WebRTCNumberOfActiveSessions": {
+      "Format": "uint8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00008057-0000-1000-8000-0026BB765291",
+      "minValue": 0,
+      "maxValue": 255
+   },
+   "WebRTCReoffer": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "wr"
+      ],
+      "UUID": "00008058-0000-1000-8000-0026BB765291"
+   },
+   "WebRTCUpdateSession": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "wr"
+      ],
+      "UUID": "0000805C-0000-1000-8000-0026BB765291"
+   },
+   "WebRTCSupportedVideoStreamTiers": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00008059-0000-1000-8000-0026BB765291"
+   },
+   "WebRTCSupportedAudioStreamTiers": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "0000805A-0000-1000-8000-0026BB765291"
+   },
+   "CameraClientCSR": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw",
+         "wr"
+      ],
+      "UUID": "00008081-0000-1000-8000-0026BB765291"
+   },
+   "CameraClientCertificate": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "pw"
+      ],
+      "UUID": "00008082-0000-1000-8000-0026BB765291"
+   },
+   "CameraClientCertificateStatus": {
+      "Format": "tlv8",
+      "Permissions": [
+         "pr",
+         "ev"
+      ],
+      "UUID": "00008083-0000-1000-8000-0026BB765291"
    }
 }
