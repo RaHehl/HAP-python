@@ -15,7 +15,7 @@ import h11
 from pyhap.accessory import get_topic
 from pyhap.const import HAP_REPR_AID, HAP_REPR_IID
 
-from .hap_crypto import HAPCrypto
+from .hap_crypto import HAPCrypto, hap_hkdf
 from .hap_event import create_hap_event
 from .hap_handler import HAPResponse, HAPServerHandler
 from .util import async_create_background_task
@@ -62,6 +62,7 @@ class HAPServerProtocol(asyncio.Protocol):
 
         self.last_activity: float | None = None
         self.hap_crypto: HAPCrypto | None = None
+        self._shared_key: bytes | None = None
         self._event_timer: asyncio.TimerHandle | None = None
         self._event_queue: dict[tuple[int, int], dict[str, Any]] = {}
 
@@ -114,6 +115,16 @@ class HAPServerProtocol(asyncio.Protocol):
         self.connections[peername] = self
         self.handler = HAPServerHandler(self.accessory_driver, peername)
 
+    def derive_key(self, salt: bytes, info: bytes) -> bytes | None:
+        """Derive a key from this connection's pair-verify session key.
+
+        Uses HKDF-SHA512 like the HAP control channel. Never returns the session
+        key itself. Returns ``None`` while the connection is not encrypted.
+        """
+        if self._shared_key is None:
+            return None
+        return hap_hkdf(self._shared_key, salt, info)
+
     def write(self, data: bytes) -> None:
         """Write data to the client."""
         self.last_activity = time.time()
@@ -137,8 +148,10 @@ class HAPServerProtocol(asyncio.Protocol):
 
     def close(self) -> None:
         """Remove the connection and close the transport."""
-        if self.peername in self.connections:
+        # A newer connection may already be registered under the same peername.
+        if self.peername is not None and self.connections.get(self.peername) is self:
             del self.connections[self.peername]
+        self._shared_key = None
         self._transport.write_eof()
         self._transport.close()
 
@@ -321,12 +334,8 @@ class HAPServerProtocol(asyncio.Protocol):
         # If we get a shared key, upgrade to encrypted
         if response.shared_key:
             self.hap_crypto = HAPCrypto(response.shared_key)
-            # Publish the session key so transports derived from this session
-            # (e.g. HomeKit Data Stream) can be set up from a characteristic write.
-            assert self.peername is not None  # noqa: S101
-            self.accessory_driver.session_shared_keys[self.peername] = (
-                response.shared_key
-            )
+            # Kept for transports derived from this session, e.g. HomeKit Data Stream.
+            self._shared_key = response.shared_key
         # Only update mDNS after sending the response
         if response.pairing_changed:
             async_create_background_task(
