@@ -6,7 +6,7 @@ the services may change with any iOS or tvOS release.
 The camera offers:
 
 - H.265 multi-tier live view for local controllers
-  (``MultiTierMediaDelegate``, High, Medium and Low tiers),
+  (``MultiTierMediaDelegate``, one tier per stream),
 - WebRTC live view for remote controllers through a home hub
   (``WebRTCMediaDelegate``),
 - HKSV recordings with a prebuffer (``RecordingMediaDelegate``), triggered
@@ -23,21 +23,28 @@ Prerequisites:
   view) and libopus (audio),
 - this branch of HAP-python, e.g. ``pip install -e .`` in its checkout.
 
-Run it with a test picture (testsrc2 and a sine tone, encoded to H.265 at
-start)::
+``--highest``, ``--high``, ``--medium`` and ``--low`` each take one H.265
+stream as ``URL@WIDTHxHEIGHT`` and announce it to HomeKit as the tier of that
+video quality. The guide asks for at least three per sensor: High (the full
+sensor resolution, 4K, 2K or 1080p, also recorded), Medium (1080p, 720p for
+a 1080p camera) and Low (360p or 240p). Highest is an optional 4K stream
+next to a 2K High. ``--high`` is required, with fewer than three the library
+warns, which lets you see what a hub does with them. One URL can serve
+several qualities. The controller picks a tier per session and switches
+between them. The lowest stream gives the snapshots and the classic live
+view. ``test`` as URL encodes a test picture (testsrc2 and a sine tone) at
+start, which is the default for High, Medium and Low::
 
     python accessories/camera_hksv_main.py
 
-or with a real H.265 camera, main stream for the High tier and recordings,
-sub stream for Medium and Low (the sub stream defaults to the main one)::
-
     python accessories/camera_hksv_main.py \
-        --main rtsp://user:pass@camera/main --main-size 1920x1080 \
-        --sub rtsp://user:pass@camera/sub --sub-size 640x360
+        --high rtsp://user:pass@camera/high@1920x1080 \
+        --medium rtsp://user:pass@camera/medium@1280x720 \
+        --low rtsp://user:pass@camera/low@640x360 --fps 30
 
-``--main`` can also come from ``HKSV_MAIN_URL`` and ``--sub`` from
-``HKSV_SUB_URL``. The sizes and ``--fps`` must be what the streams deliver,
-they are advertised as is.
+Each can also come from ``HKSV_HIGHEST``, ``HKSV_HIGH``, ``HKSV_MEDIUM`` and
+``HKSV_LOW``. The sizes and ``--fps`` must be what the streams deliver, they
+are advertised as is.
 
 Pairing: the log prints the setup code and a QR code (with
 ``pip install HAP-python[QRCode]``). In the Home app tap +, Add Accessory,
@@ -116,10 +123,21 @@ CLASSIC_STREAM_CMD = (
 )
 
 
-def parse_size(value: str) -> tuple[int, int]:
-    """Parse WIDTHxHEIGHT."""
-    width, _, height = value.lower().partition("x")
-    return int(width), int(height)
+# The test picture when no stream is given.
+DEFAULT_STREAMS = {
+    hksv3.VideoQuality.HIGH: "test@1920x1080",
+    hksv3.VideoQuality.MEDIUM: "test@1280x720",
+    hksv3.VideoQuality.LOW: "test@640x360",
+}
+
+
+def parse_stream(value: str) -> tuple[str, tuple[int, int]]:
+    """Parse URL@WIDTHxHEIGHT, the size after the last @."""
+    url, _, size = value.rpartition("@")
+    width, _, height = size.lower().partition("x")
+    if not url or not width.isdigit() or not height.isdigit():
+        raise argparse.ArgumentTypeError(f"expected URL@WIDTHxHEIGHT, got {value!r}")
+    return url, (int(width), int(height))
 
 
 def bitrates(width: int, height: int) -> tuple[int, int]:
@@ -176,41 +194,36 @@ class HKSVCamera(camera.Camera):
         self.motion_interval = args.motion_interval
         self._motion_task: asyncio.Task[None] | None = None
         self._tmp = tempfile.mkdtemp(prefix="camera-hksv-")
-        main_size, sub_size = args.main_size, args.sub_size or (640, 360)
-        if args.main and not args.sub:
-            sub_size = main_size
-        if args.main:
-            main = input_args(args.main)
-            sub = input_args(args.sub) if args.sub else main
-        else:
-            main = make_test_clip(
-                args.ffmpeg, args.encoder, main_size, args.fps, self._tmp
+        # Each quality announced with its stream, best first.
+        tiers = {
+            quality: (
+                make_test_clip(args.ffmpeg, args.encoder, size, args.fps, self._tmp)
+                if url == "test"
+                else input_args(url),
+                size,
             )
-            sub = make_test_clip(
-                args.ffmpeg, args.encoder, sub_size, args.fps, self._tmp
-            )
-        self.snapshot_input = sub
-        sizes = {
-            hksv3.VideoQuality.HIGH: main_size,
-            hksv3.VideoQuality.MEDIUM: sub_size,
-            hksv3.VideoQuality.LOW: sub_size,
+            for quality, (url, size) in sorted(args.streams.items())
         }
+        sub = tiers[max(tiers)][0]
+        self.snapshot_input = sub
+        sizes = {quality: size for quality, (_, size) in tiers.items()}
+        main_size = tiers[hksv3.VideoQuality.HIGH][1]
 
         # One worker loop and one pool: each channel is pulled once for all
         # local and remote sessions and the recording.
         self.worker = MediaWorker()
         self.sources = FFmpegSourceProvider(
-            {"high": main, "medium": sub, "low": sub},
+            {quality: ffmpeg_input for quality, (ffmpeg_input, _) in tiers.items()},
             worker=self.worker,
             ffmpeg=args.ffmpeg,
             audio=not args.no_audio,
         )
-        width, height = main_size
-        average, _peak = bitrates(width, height)
+        width, height = tiers[min(tiers)][1]
+        average, _peak = bitrates(*main_size)
         self.recording = RecordingMediaDelegate(
             self.sources,
             hksv3.VideoStreamTier(
-                0, hksv3.VideoQuality.HIGH, average, width, height, args.fps
+                0, hksv3.VideoQuality.HIGH, average, *main_size, args.fps
             ),
             prebuffer_ms=args.prebuffer,
         )
@@ -329,22 +342,15 @@ class HKSVCamera(camera.Camera):
 def main() -> None:
     """Parse the arguments and run the camera until SIGINT or SIGTERM."""
     parser = argparse.ArgumentParser(description=__doc__.partition("\n")[0])
-    parser.add_argument(
-        "--main",
-        default=os.environ.get("HKSV_MAIN_URL"),
-        help="H.265 main stream URL; a test source without it",
-    )
-    parser.add_argument(
-        "--sub",
-        default=os.environ.get("HKSV_SUB_URL"),
-        help="H.265 sub stream URL (default: the main stream)",
-    )
-    parser.add_argument("--main-size", type=parse_size, default=(1280, 720))
-    parser.add_argument(
-        "--sub-size",
-        type=parse_size,
-        help="default: 640x360, the main size without --sub",
-    )
+    for quality in hksv3.VideoQuality:
+        name = quality.name.lower()
+        parser.add_argument(
+            f"--{name}",
+            type=parse_stream,
+            default=os.environ.get(f"HKSV_{quality.name}"),
+            metavar="URL@WIDTHxHEIGHT",
+            help=f"H.265 stream of the {name} tier, 'test' as URL for a test picture",
+        )
     parser.add_argument("--fps", type=int, default=15)
     parser.add_argument(
         "--no-audio", action="store_true", help="the streams have no audio"
@@ -371,6 +377,17 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=51826)
     parser.add_argument("--persist", default="camera_hksv.state")
     args = parser.parse_args()
+    args.streams = {
+        quality: stream
+        for quality in hksv3.VideoQuality
+        if (stream := getattr(args, quality.name.lower())) is not None
+    }
+    if not args.streams:
+        args.streams = {
+            quality: parse_stream(value) for quality, value in DEFAULT_STREAMS.items()
+        }
+    if hksv3.VideoQuality.HIGH not in args.streams:
+        parser.error("--high is required")
 
     logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
     driver = AccessoryDriver(port=args.port, persist_file=args.persist)
