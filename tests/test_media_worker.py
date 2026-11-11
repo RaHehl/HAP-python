@@ -1,4 +1,4 @@
-"""Tests for pyhap.media.worker: WebRTC senders in a worker process."""
+"""Tests for pyhap.media.worker: framing, worker processes and WebRTC senders."""
 
 from __future__ import annotations
 
@@ -6,18 +6,24 @@ import asyncio
 from collections.abc import AsyncIterator
 import contextlib
 import logging
-import re
+import os
+import pathlib
+import signal
+import time
 from typing import Any
 
 import pytest
 
 from pyhap.media import AudioParams, _worker, worker as worker_module  # noqa: E402
 from pyhap.media.worker import (  # noqa: E402
+    LOG_FILE_MAX_AGE,
     MAX_MESSAGE,
     MediaWorker,
     MediaWorkerError,
     RemoteWebRTCSender,
     encode_message,
+    log_file,
+    prepare_log_dir,
     read_message,
 )
 
@@ -39,9 +45,9 @@ pytestmark = pytest.mark.timeout(30)
 
 
 @pytest.fixture
-async def worker() -> AsyncIterator[MediaWorker]:
-    """Yield a started worker and stop it afterwards."""
-    started = MediaWorker()
+async def worker(tmp_path: pathlib.Path) -> AsyncIterator[MediaWorker]:
+    """Yield a started worker process and stop it afterwards."""
+    started = MediaWorker(separate_process=True, log_dir=tmp_path)
     await started.start()
     yield started
     await started.close()
@@ -261,8 +267,8 @@ async def test_worker_crash_ends_sessions_and_restarts(
 
 def kill(worker: MediaWorker) -> None:
     """Crash the worker process."""
-    assert worker._process is not None
-    worker._process.kill()
+    assert worker._runner is not None
+    worker._runner.kill()
 
 
 async def test_close_during_offer(worker: MediaWorker) -> None:
@@ -280,22 +286,22 @@ async def test_close_during_offer(worker: MediaWorker) -> None:
     assert worker._handles == {}
 
 
-async def test_worker_logs_reach_parent(
+async def test_worker_logs_to_its_file(
     worker: MediaWorker, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Verify log records of the worker are re-emitted in the parent."""
+    """Verify the worker process writes its WebRTC records to its log file."""
     await worker.close()
     caplog.set_level(logging.DEBUG, logger="pyhap.media")
     sender = remote_sender(worker, offer_timeout=0.2)
     await sender.create_offer()
     await asyncio.wait_for(wait_until(lambda: sender.closed), 5)
-    assert "[media worker] WebRTC session closed: offer not answered" in caplog.text
+    assert logged_in_worker(worker, "pyhap.media", "WebRTC session closed: offer")
 
 
 async def test_worker_follows_changed_log_levels(
     worker: MediaWorker, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Verify a running worker takes the parent's levels when told to."""
+    """Verify a running worker process takes the parent's level when told to."""
     logging.getLogger("pyhap.media").setLevel(logging.WARNING)
     await worker.close()
     await worker.start()
@@ -304,27 +310,37 @@ async def test_worker_follows_changed_log_levels(
     sender = remote_sender(worker, offer_timeout=0.2)
     await sender.create_offer()
     await asyncio.wait_for(wait_until(lambda: sender.closed), 5)
-    assert "[media worker] WebRTC session closed: offer not answered" in caplog.text
+    assert logged_in_worker(worker, "pyhap.media", "WebRTC session closed: offer")
 
 
 async def test_worker_forwards_ice_logs(
     worker: MediaWorker, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Verify the worker's ICE records reach the parent at its level."""
+    """Verify the worker process logs its ICE records at the parent's level."""
     await worker.close()
     caplog.set_level(logging.DEBUG, logger="pyhap.media")
     sender = remote_sender(worker)
     controller = Controller()
     await negotiate(sender, controller)
-    await asyncio.wait_for(wait_until(lambda: ice_selected_in_worker(caplog)), 5)
+    await asyncio.wait_for(wait_until(lambda: ice_selected_in_worker(worker)), 5)
     await sender.close()
     await controller.close()
 
 
-def ice_selected_in_worker(caplog: pytest.LogCaptureFixture) -> bool:
+def ice_selected_in_worker(worker: MediaWorker) -> bool:
     """Whether the worker's ICE agent logged its selected pair."""
-    return bool(
-        re.search(r"pyhap\.media\.ice:.*\[media worker\] ICE selected", caplog.text)
+    return logged_in_worker(worker, "pyhap.media.ice", "ICE selected")
+
+
+def logged_in_worker(worker: MediaWorker, name: str, start: str) -> bool:
+    """Whether the worker process logged ``start...`` with a ``name`` logger."""
+    assert worker.pid is not None
+    path = pathlib.Path(log_file(worker._log_dir, worker.pid))
+    if not path.exists():
+        return False
+    return any(
+        f"[{name}" in line and f"] {start}" in line
+        for line in path.read_text().splitlines()
     )
 
 
@@ -336,13 +352,18 @@ def test_unknown_option_is_refused() -> None:
         )
 
 
-async def test_stuck_worker_is_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("separate_process", [False, True], ids=["thread", "process"])
+async def test_stuck_worker_is_stopped(
+    monkeypatch: pytest.MonkeyPatch, separate_process: bool, tmp_path: pathlib.Path
+) -> None:
     """Verify a worker that stops answering is ended and replaced."""
-    worker = MediaWorker(request_timeout=0.5)
+    worker = MediaWorker(
+        separate_process=separate_process, log_dir=tmp_path, request_timeout=0.5
+    )
     sender = remote_sender(worker)
     events = Events(sender)
     await sender.create_offer()
-    pid = worker.pid
+    generation = worker._generation
     monkeypatch.setattr(worker, "_dispatch", ignore_message)
     with pytest.raises(MediaWorkerError, match="did not answer"):
         await sender.update_receive_keys([TALKBACK_KEY])
@@ -351,7 +372,7 @@ async def test_stuck_worker_is_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
     await sender.close()
     monkeypatch.undo()
     assert "m=video" in await remote_sender(worker).create_offer()
-    assert worker.pid != pid
+    assert worker._generation > generation
     await worker.close()
 
 
@@ -415,17 +436,6 @@ async def test_unencodable_answer_becomes_an_error() -> None:
     assert message["error"].startswith("Answer not sent")
 
 
-async def test_slow_parent_loses_log_records_first() -> None:
-    """Verify a backed up pipe drops log records but still sends events."""
-    output = Output(buffered=_worker.LOG_DROP_BUFFER + 1)
-    server = _worker._Server(output)  # ty: ignore[invalid-argument-type]
-    server.send({"event": "log", "level": 30, "name": "pyhap", "message": "x"})
-    assert output.data == b""
-    server.send({"event": "source_closed", "source": 1, "reason": "x"})
-    message, _blob = await read_message(reader_of(output.data))
-    assert message["event"] == "source_closed"
-
-
 async def test_stalled_parent_stops_the_worker() -> None:
     """Verify the worker gives up on a parent that stopped reading."""
     output = Output(buffered=_worker.MAX_OUTPUT_BUFFER + 1)
@@ -454,3 +464,85 @@ async def test_worker_crash_ends_its_sources(worker: MediaWorker) -> None:
     again = await worker.open_source()
     assert worker.pid != pid
     assert not again.closed
+
+
+async def wait_for_line(path: pathlib.Path, text: str) -> str:
+    """Wait until the file at ``path`` contains ``text``; return the file."""
+    for _ in range(300):
+        if path.exists() and text in (content := path.read_text()):
+            return content
+        await asyncio.sleep(0.01)
+    pytest.fail(f"{text!r} not in {path}")
+
+
+async def test_process_logs_to_its_own_file(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Verify a worker process logs to its own file, not through the parent."""
+    caplog.set_level(logging.DEBUG, logger="pyhap.media")
+    worker = MediaWorker(separate_process=True, log_dir=tmp_path)
+    try:
+        await worker.open_source(audio=False)
+        assert worker.pid is not None
+        path = pathlib.Path(log_file(str(tmp_path), worker.pid))
+        content = await wait_for_line(path, "Media input buffer")
+        assert "[pyhap.media.source]" in content
+        assert not any("Media input buffer" in r.getMessage() for r in caplog.records)
+        assert str(path) in caplog.text
+    finally:
+        await worker.close()
+
+
+async def test_process_follows_level_changes(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Verify the worker process logs debug records once the level allows them."""
+    caplog.set_level(logging.WARNING, logger="pyhap.media")
+    worker = MediaWorker(separate_process=True, log_dir=tmp_path)
+    try:
+        await worker.open_source(audio=False)
+        assert worker.pid is not None
+        path = pathlib.Path(log_file(str(tmp_path), worker.pid))
+        await asyncio.sleep(0.1)
+        assert "Media input buffer" not in path.read_text()
+        caplog.set_level(logging.DEBUG, logger="pyhap.media")
+        await worker.update_log_levels()
+        await worker.open_source(audio=False)
+        await wait_for_line(path, "Media input buffer")
+    finally:
+        await worker.close()
+
+
+async def test_process_crash_output_lands_in_its_file(tmp_path: pathlib.Path) -> None:
+    """Verify what the worker process writes to stderr ends up in its log file."""
+    worker = MediaWorker(separate_process=True, log_dir=tmp_path)
+    try:
+        await worker.start()
+        assert worker.pid is not None
+        path = pathlib.Path(log_file(str(tmp_path), worker.pid))
+        os.kill(worker.pid, signal.SIGSEGV)
+        await wait_for_line(path, "Fatal Python error")
+    finally:
+        await worker.close()
+
+
+def test_old_log_files_are_removed(tmp_path: pathlib.Path) -> None:
+    """Verify starting a worker process removes stale log files only."""
+    old = tmp_path / "pyhap-media-1.log"
+    old_backup = tmp_path / "pyhap-media-1.log.1"
+    fresh = tmp_path / "pyhap-media-2.log"
+    other = tmp_path / "other.log"
+    for path in (old, old_backup, fresh, other):
+        path.write_text("x")
+    stale = time.time() - LOG_FILE_MAX_AGE - 60
+    for path in (old, old_backup, other):
+        os.utime(path, (stale, stale))
+
+    prepare_log_dir(str(tmp_path / "new"))
+    prepare_log_dir(str(tmp_path))
+
+    assert (tmp_path / "new").is_dir()
+    assert not old.exists()
+    assert not old_backup.exists()
+    assert fresh.exists()
+    assert other.exists()

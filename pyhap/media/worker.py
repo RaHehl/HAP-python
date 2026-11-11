@@ -1,27 +1,30 @@
-"""Run media sources, senders and recorders in a worker process.
+"""Run media sources, senders and recorders in a worker thread or process.
 
 SFrame, SRTP and pacing cost CPU for every packet of every session. In an
 application that also runs other work on its event loop (Home Assistant runs
-HAP signalling on its main loop) the media path therefore runs in a separate
-process. Only the signalling stays on the caller's loop: the proxies here
+HAP signalling on its main loop) the media path therefore runs on a loop of
+its own. Only the signalling stays on the caller's loop: the proxies here
 have the async API of :class:`~pyhap.media.source.MediaSource`, the
 WebRTC and multi-tier senders and :class:`~pyhap.media.recording.Recorder`,
 and their events are called on the caller's loop.
 
-One :class:`MediaWorker` is one process with one asyncio loop, shared by
-all cameras of the application. A process per camera would cost a Python
-interpreter and the crypto imports for each camera, while one loop easily
-carries several sessions; an integrator that wants isolation or more cores
-can still create several workers. The process starts on first use (or with
-:meth:`MediaWorker.start`). When it exits unexpectedly, every session
-and source of it ends with a reason, and the next use starts a new one.
+One :class:`MediaWorker` is one asyncio loop, shared by all cameras of the
+application; one loop easily carries several sessions. It starts on first
+use (or with :meth:`MediaWorker.start`). When it ends unexpectedly, every
+session and source of it ends with a reason, and the next use starts a new
+one.
 
-The worker talks over its stdin and stdout pipes in length-prefixed frames:
+By default the worker is a thread of the caller's process. It shares the
+loggers and costs no second interpreter, but shares the GIL with the
+application. With ``MediaWorker(separate_process=True)`` it runs in a child
+process instead, which needs a POSIX system. That process logs to a file of
+its own, ``pyhap-media-<pid>.log`` in ``log_dir``, rotated by size; its
+stderr goes there too, so a crash leaves its traceback. Starting a worker
+process removes such files that were not written for a week.
+
+Either way the worker talks over a socket pair in length-prefixed frames:
 a 4-byte JSON length, a 4-byte binary length, a JSON object and raw bytes
-(talkback audio). Nothing is pickled. The worker moves its own stdout aside
-so stray prints cannot corrupt the stream, and forwards the records of its
-``pyhap`` loggers to the parent's loggers, at the parent's
-levels.
+(recording data, talkback audio). Nothing is pickled.
 
 Fan-out: register a source per camera channel with
 :meth:`MediaWorker.open_source`, point the media pull at its
@@ -38,8 +41,12 @@ import contextlib
 import itertools
 import logging
 import os
+import socket
 import struct
 import sys
+import tempfile
+import threading
+import time
 from typing import Any
 
 import orjson
@@ -57,9 +64,17 @@ DEFAULT_START_TIMEOUT = 15.0
 DEFAULT_REQUEST_TIMEOUT = 5.0
 STOP_TIMEOUT = 5.0
 WORKER_MODULE = "pyhap.media._worker"
-# The loggers the worker forwards, each at the parent's effective level of
-# the logger named here.
-FORWARDED_LOGGERS = {"pyhap": "pyhap.media"}
+# A worker process logs with this logger, at the parent's effective level of
+# LEVEL_LOGGER.
+WORKER_LOGGER = "pyhap"
+LEVEL_LOGGER = "pyhap.media"
+# The log files of worker processes: name, size limit and backups per file,
+# and the age after which the next worker start removes them.
+LOG_FILE_PREFIX = "pyhap-media-"
+LOG_FILE_MAX_BYTES = 1024 * 1024
+LOG_FILE_BACKUPS = 2
+LOG_FILE_MAX_AGE = 7 * 24 * 3600
+THREAD_NAME = "pyhap-media-worker"
 
 
 class MediaWorkerError(MediaError):
@@ -96,7 +111,7 @@ def _call(callback: Callable[..., None] | None, *args: Any) -> None:
 
 
 class RemoteMediaSource:
-    """A :class:`~pyhap.media.source.MediaSource` in the worker process.
+    """A :class:`~pyhap.media.source.MediaSource` in the worker.
 
     ``on_closed(reason)`` fires when the worker exits.
     """
@@ -139,7 +154,7 @@ class RemoteMediaSource:
 
 
 class RemoteWebRTCSender:
-    """A :class:`~pyhap.media.sender.WebRTCSender` in the worker process.
+    """A :class:`~pyhap.media.sender.WebRTCSender` in the worker.
 
     Same methods and callbacks; ``on_closed(reason)`` also fires when the
     worker exits.
@@ -289,7 +304,7 @@ class RemoteWebRTCSender:
 
 
 class RemoteMultiTierSender:
-    """A :class:`~pyhap.media.multi_tier.MultiTierSender` in the worker process.
+    """A :class:`~pyhap.media.multi_tier.MultiTierSender` in the worker.
 
     Same methods and callbacks; ``on_closed(reason)`` also fires when the
     worker exits.
@@ -399,7 +414,7 @@ class RemoteMultiTierSender:
 
 
 class RemoteRecorder:
-    """A :class:`~pyhap.media.recording.Recorder` in the worker process.
+    """A :class:`~pyhap.media.recording.Recorder` in the worker.
 
     Same methods and callbacks; ``on_closed(reason)`` also fires when the
     worker exits, after ``on_ended`` for a running recording.
@@ -508,22 +523,130 @@ class RemoteRecorder:
             _call(self.on_closed, reason)
 
 
+class _ProcessRunner:
+    """The worker as a child process, talking over a socket pair."""
+
+    def __init__(
+        self,
+        process: asyncio.subprocess.Process,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        self.reader = reader
+        self.writer = writer
+        self._process = process
+
+    @property
+    def running(self) -> bool:
+        return self._process.returncode is None
+
+    @property
+    def pid(self) -> int | None:
+        return self._process.pid
+
+    def kill(self) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            self._process.kill()
+
+    async def wait(self) -> int:
+        return await self._process.wait()
+
+
+class _ThreadRunner:
+    """The worker as a thread with its own loop, talking over a socket pair."""
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        done: asyncio.Future[int],
+        thread: threading.Thread,
+    ) -> None:
+        self.reader = reader
+        self.writer = writer
+        self.thread = thread
+        self._done = done
+
+    @property
+    def running(self) -> bool:
+        return not self._done.done()
+
+    @property
+    def pid(self) -> int | None:
+        return None
+
+    def kill(self) -> None:
+        # A thread cannot be killed: drop the connection, which ends a worker
+        # that still runs its loop, and count the worker as gone either way.
+        self.writer.close()
+        if not self._done.done():
+            self._done.set_result(-1)
+
+    async def wait(self) -> int:
+        return await asyncio.shield(self._done)
+
+
+async def _start_thread() -> _ThreadRunner:
+    from . import _worker  # noqa: PLC0415 - the worker module imports this one
+
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future[int] = loop.create_future()
+    parent, child = socket.socketpair()
+
+    def finished(code: int) -> None:
+        if not done.done():
+            done.set_result(code)
+
+    def run() -> None:
+        code = 0
+        try:
+            asyncio.run(_worker.serve_socket(child))
+        except Exception:
+            logger.exception("Media worker thread failed")
+            code = 1
+        finally:
+            child.close()
+            # The parent loop may be gone when the application shuts down.
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(finished, code)
+
+    try:
+        reader, writer = await asyncio.open_connection(sock=parent)
+    except BaseException:
+        parent.close()
+        child.close()
+        raise
+    thread = threading.Thread(target=run, name=THREAD_NAME, daemon=True)
+    thread.start()
+    return _ThreadRunner(reader, writer, done, thread)
+
+
 class MediaWorker:
-    """A worker process running media sources, senders and recorders."""
+    """A worker thread, or with ``separate_process`` a process, running media."""
 
     def __init__(
         self,
         *,
+        separate_process: bool = False,
         python: str | None = None,
+        log_dir: str | os.PathLike[str] | None = None,
         start_timeout: float = DEFAULT_START_TIMEOUT,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
     ) -> None:
-        """Configure the worker; it starts on first use."""
+        """Configure the worker; it starts on first use.
+
+        ``separate_process`` runs it in a child process with the interpreter
+        ``python`` (default: this one) instead of a thread of this process.
+        That process logs to a file in ``log_dir`` (default: ``pyhap-media``
+        in the temporary directory).
+        """
         self.on_exit: Callable[[str], None] | None = None
+        self._separate_process = separate_process
         self._python = python or sys.executable
+        self._log_dir = os.fspath(log_dir) if log_dir else _default_log_dir()
         self._start_timeout = start_timeout
         self._request_timeout = request_timeout
-        self._process: asyncio.subprocess.Process | None = None
+        self._runner: _ProcessRunner | _ThreadRunner | None = None
         self._reader: asyncio.Task[None] | None = None
         self._ready: asyncio.Future[None] | None = None
         self._lock = asyncio.Lock()
@@ -537,14 +660,19 @@ class MediaWorker:
         self._sources: dict[int, RemoteMediaSource] = {}
 
     @property
+    def separate_process(self) -> bool:
+        """Whether the worker runs in a child process instead of a thread."""
+        return self._separate_process
+
+    @property
     def running(self) -> bool:
-        """Whether the worker process is up."""
-        return self._process is not None and self._process.returncode is None
+        """Whether the worker is up."""
+        return self._runner is not None and self._runner.running
 
     @property
     def pid(self) -> int | None:
-        """The worker's process ID while it runs."""
-        return self._process.pid if self.running and self._process else None
+        """The worker's process ID while it runs as a child process."""
+        return self._runner.pid if self.running and self._runner else None
 
     async def start(self) -> int:
         """Start the worker unless it runs; return its generation."""
@@ -555,48 +683,76 @@ class MediaWorker:
             return self._generation
 
     async def _spawn(self) -> None:
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(
-            os.path.abspath(path) for path in sys.path if path
-        )
-        levels = [str(level) for level in _log_levels()]
-        # -P and a fixed working directory: the worker uses exactly the
-        # parent's import path.
-        process = await asyncio.create_subprocess_exec(
-            self._python,
-            "-P",
-            "-m",
-            WORKER_MODULE,
-            *levels,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=os.path.abspath(os.sep),
+        runner = await (
+            self._start_process() if self._separate_process else _start_thread()
         )
         if self._handles or self._sources or self._pending:
-            # The previous process exited and its reader did not get to it yet.
+            # The previous worker exited and its reader did not get to it yet.
             self._exited(self._generation, "media worker exited")
         self._generation += 1
         self._stopping = False
-        self._process = process
+        self._runner = runner
         self._ready = asyncio.get_running_loop().create_future()
         self._reader = asyncio.get_running_loop().create_task(
-            self._read_loop(process, self._generation)
+            self._read_loop(runner, self._generation)
         )
         try:
             await asyncio.wait_for(asyncio.shield(self._ready), self._start_timeout)
         except BaseException:
-            await self._kill(process)
+            await self._kill(runner)
             raise
-        logger.debug("Media worker %s started", process.pid)
+        if runner.pid is None:
+            logger.debug("Media worker started in a thread")
+        else:
+            logger.debug(
+                "Media worker %s started, logging to %s",
+                runner.pid,
+                log_file(self._log_dir, runner.pid),
+            )
+
+    async def _start_process(self) -> _ProcessRunner:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            os.path.abspath(path) for path in sys.path if path
+        )
+        await asyncio.get_running_loop().run_in_executor(
+            None, prepare_log_dir, self._log_dir
+        )
+        parent, child = socket.socketpair()
+        try:
+            with child:
+                # -P and a fixed working directory: the worker uses exactly
+                # the parent's import path.
+                process = await asyncio.create_subprocess_exec(
+                    self._python,
+                    "-P",
+                    "-m",
+                    WORKER_MODULE,
+                    str(child.fileno()),
+                    str(_log_level()),
+                    self._log_dir,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    pass_fds=(child.fileno(),),
+                    env=env,
+                    cwd=os.path.abspath(os.sep),
+                )
+            reader, writer = await asyncio.open_connection(sock=parent)
+        except BaseException:
+            parent.close()
+            raise
+        return _ProcessRunner(process, reader, writer)
 
     async def update_log_levels(self) -> None:
         """Apply the parent's current log levels in the worker.
 
-        The worker starts with the levels of that moment; call this after
-        changing them, e.g. when an integration turns on debug logging.
+        A worker process starts with the level of that moment; call this
+        after changing it, e.g. when an integration turns on debug logging. A
+        worker thread shares the loggers, so there is nothing to apply.
         """
-        await self._request("log_levels", self._generation, levels=_log_levels())
+        if not self._separate_process:
+            return
+        await self._request("log_level", self._generation, level=_log_level())
 
     async def open_source(
         self, host: str = "127.0.0.1", audio: bool = True
@@ -699,37 +855,30 @@ class MediaWorker:
     async def close(self) -> None:
         """End every session and stop the worker."""
         async with self._lock:
-            process = self._process
-            if process is None or process.returncode is not None:
+            runner = self._runner
+            if runner is None or not runner.running:
                 return
             self._stopping = True
             with contextlib.suppress(MediaWorkerError, asyncio.TimeoutError):
                 await asyncio.wait_for(
                     self._request("shutdown", self._generation), STOP_TIMEOUT
                 )
-            if process.stdin is not None:
-                process.stdin.close()
+            runner.writer.close()
             try:
-                await asyncio.wait_for(process.wait(), STOP_TIMEOUT)
+                await asyncio.wait_for(runner.wait(), STOP_TIMEOUT)
             except TimeoutError:
-                await self._kill(process)
+                await self._kill(runner)
             if self._reader is not None:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._reader
 
-    async def _kill(self, process: asyncio.subprocess.Process) -> None:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        await process.wait()
+    async def _kill(self, runner: _ProcessRunner | _ThreadRunner) -> None:
+        runner.kill()
+        await runner.wait()
 
     async def _request(self, op: str, generation: int, **fields: Any) -> Any:
-        process = self._process
-        if (
-            generation != self._generation
-            or process is None
-            or process.stdin is None
-            or not self.running
-        ):
+        runner = self._runner
+        if generation != self._generation or runner is None or not runner.running:
             raise MediaWorkerError("Media worker is not running")
         request_id = next(self._ids)
         try:
@@ -740,7 +889,7 @@ class MediaWorker:
         self._pending[request_id] = future
         try:
             return await asyncio.wait_for(
-                self._exchange(process.stdin, data, future), self._request_timeout
+                self._exchange(runner.writer, data, future), self._request_timeout
             )
         except (ConnectionError, BrokenPipeError) as err:
             raise MediaWorkerError("Media worker is not running") from err
@@ -748,40 +897,37 @@ class MediaWorker:
             # A worker that stops answering is stuck: end it, so its sessions
             # end and the next use starts a new one.
             logger.warning("Media worker did not answer %s, stopping it", op)
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
+            runner.kill()
             raise MediaWorkerError(f"Media worker did not answer {op}") from err
         finally:
             self._pending.pop(request_id, None)
 
     @staticmethod
     async def _exchange(
-        stdin: asyncio.StreamWriter, data: bytes, future: asyncio.Future[Any]
+        writer: asyncio.StreamWriter, data: bytes, future: asyncio.Future[Any]
     ) -> Any:
         """Send a request and wait for its answer, under one deadline."""
-        stdin.write(data)
-        await stdin.drain()
+        writer.write(data)
+        await writer.drain()
         return await future
 
     async def _read_loop(
-        self, process: asyncio.subprocess.Process, generation: int
+        self, runner: _ProcessRunner | _ThreadRunner, generation: int
     ) -> None:
-        stdout = process.stdout
         reason = "media worker exited"
         try:
-            while stdout is not None:
-                message, blob = await read_message(stdout)
+            while True:
+                message, blob = await read_message(runner.reader)
                 self._dispatch(message, blob)
-        except asyncio.IncompleteReadError:
+        except (asyncio.IncompleteReadError, ConnectionError):
             pass
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001 - a broken stream ends the worker
             logger.warning("Media worker sent invalid data: %r", err)
             reason = "media worker protocol error"
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
-        code = await process.wait()
+            runner.kill()
+        code = await runner.wait()
         if self._stopping:
             reason = "media worker stopped"
         self._exited(generation, f"{reason} (code {code})")
@@ -800,12 +946,6 @@ class MediaWorker:
         if event == "ready":
             if self._ready is not None and not self._ready.done():
                 self._ready.set_result(None)
-        elif event == "log":
-            logging.getLogger(str(message.get("name", __name__))).log(
-                int(message.get("level", logging.INFO)),
-                "[media worker] %s",
-                message.get("message", ""),
-            )
         elif event == "source_closed":
             source = self._sources.pop(int(message["source"]), None)
             if source is not None:
@@ -859,12 +999,35 @@ _MULTI_TIER_OPTIONS = {
 }
 
 
-def _log_levels() -> list[int]:
-    """The parent's effective level of each forwarded logger."""
-    return [
-        logging.getLogger(name).getEffectiveLevel()
-        for name in FORWARDED_LOGGERS.values()
-    ]
+def _log_level() -> int:
+    """The level a worker process logs at."""
+    return logging.getLogger(LEVEL_LOGGER).getEffectiveLevel()
+
+
+def _default_log_dir() -> str:
+    name = "pyhap-media"
+    if hasattr(os, "getuid"):
+        # The temporary directory may be shared between users.
+        name += f"-{os.getuid()}"
+    return os.path.join(tempfile.gettempdir(), name)
+
+
+def log_file(log_dir: str, pid: int) -> str:
+    """The log file of the worker process ``pid``."""
+    return os.path.join(log_dir, f"{LOG_FILE_PREFIX}{pid}.log")
+
+
+def prepare_log_dir(log_dir: str) -> None:
+    """Create ``log_dir`` and remove worker log files not written for a week."""
+    os.makedirs(log_dir, mode=0o700, exist_ok=True)
+    oldest = time.time() - LOG_FILE_MAX_AGE
+    with os.scandir(log_dir) as entries:
+        for entry in entries:
+            if not entry.name.startswith(LOG_FILE_PREFIX) or ".log" not in entry.name:
+                continue
+            with contextlib.suppress(OSError):
+                if entry.is_file() and entry.stat().st_mtime < oldest:
+                    os.unlink(entry.path)
 
 
 def _fields(params: VideoParams | AudioParams) -> dict[str, Any]:
