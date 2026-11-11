@@ -24,7 +24,7 @@ Prerequisites:
 - this branch of HAP-python, e.g. ``pip install -e .`` in its checkout.
 
 ``--highest``, ``--high``, ``--medium`` and ``--low`` each take one H.265
-stream as ``URL@WIDTHxHEIGHT`` and announce it to HomeKit as the tier of that
+stream as ``URL@WIDTHxHEIGHT@FPS`` and announce it to HomeKit as the tier of that
 video quality. The guide asks for at least three per sensor: High (the full
 sensor resolution, 4K, 2K or 1080p, also recorded), Medium (1080p, 720p for
 a 1080p camera) and Low (360p or 240p). Highest is an optional 4K stream
@@ -33,18 +33,19 @@ warns, which lets you see what a hub does with them. One URL can serve
 several qualities. The controller picks a tier per session and switches
 between them. The lowest stream gives the snapshots and the classic live
 view. ``test`` as URL encodes a test picture (testsrc2 and a sine tone) at
-start, which is the default for High, Medium and Low::
+start, which is the default for High, Medium and Low (1080p and 720p at
+30 fps, 360p at 15 fps)::
 
     python accessories/camera_hksv_main.py
 
     python accessories/camera_hksv_main.py \
-        --high rtsp://user:pass@camera/high@1920x1080 \
-        --medium rtsp://user:pass@camera/medium@1280x720 \
-        --low rtsp://user:pass@camera/low@640x360 --fps 30
+        --high rtsp://user:pass@camera/high@1920x1080@30 \
+        --medium rtsp://user:pass@camera/medium@1280x720@30 \
+        --low rtsp://user:pass@camera/low@640x360@15
 
 Each can also come from ``HKSV_HIGHEST``, ``HKSV_HIGH``, ``HKSV_MEDIUM`` and
-``HKSV_LOW``. The sizes and ``--fps`` must be what the streams deliver, they
-are advertised as is.
+``HKSV_LOW``. Size and frame rate must be what the stream delivers, they are
+advertised as is.
 
 Pairing: the log prints the setup code and a QR code (with
 ``pip install HAP-python[QRCode]``). In the Home app tap +, Add Accessory,
@@ -125,19 +126,24 @@ CLASSIC_STREAM_CMD = (
 
 # The test picture when no stream is given.
 DEFAULT_STREAMS = {
-    hksv3.VideoQuality.HIGH: "test@1920x1080",
-    hksv3.VideoQuality.MEDIUM: "test@1280x720",
-    hksv3.VideoQuality.LOW: "test@640x360",
+    hksv3.VideoQuality.HIGH: "test@1920x1080@30",
+    hksv3.VideoQuality.MEDIUM: "test@1280x720@30",
+    hksv3.VideoQuality.LOW: "test@640x360@15",
 }
+# Width, height and frame rate of a stream.
+Format = tuple[int, int, int]
 
 
-def parse_stream(value: str) -> tuple[str, tuple[int, int]]:
-    """Parse URL@WIDTHxHEIGHT, the size after the last @."""
-    url, _, size = value.rpartition("@")
+def parse_stream(value: str) -> tuple[str, Format]:
+    """Parse URL@WIDTHxHEIGHT@FPS, size and frame rate after the last two @."""
+    rest, _, fps = value.rpartition("@")
+    url, _, size = rest.rpartition("@")
     width, _, height = size.lower().partition("x")
-    if not url or not width.isdigit() or not height.isdigit():
-        raise argparse.ArgumentTypeError(f"expected URL@WIDTHxHEIGHT, got {value!r}")
-    return url, (int(width), int(height))
+    if not url or not all(map(str.isdigit, (width, height, fps))):
+        raise argparse.ArgumentTypeError(
+            f"expected URL@WIDTHxHEIGHT@FPS, got {value!r}"
+        )
+    return url, (int(width), int(height), int(fps))
 
 
 def bitrates(width: int, height: int) -> tuple[int, int]:
@@ -157,28 +163,30 @@ def input_args(url: str) -> list[str]:
 
 
 def make_test_clip(
-    ffmpeg: str, encoder: str, size: tuple[int, int], fps: int, directory: str
+    ffmpeg: str, encoder: str, video: Format, directory: str
 ) -> list[str]:
     """Encode a looping H.265 test clip, return its ffmpeg input arguments.
 
     MPEG-TS keeps the Annex B parameter sets the copy needs.
     """
-    width, height = size
-    path = os.path.join(directory, f"test-{width}x{height}.ts")
+    width, height, fps = video
+    path = os.path.join(directory, f"test-{width}x{height}-{fps}.ts")
     gop = 2 * fps
     if encoder == "libx265":
         params = f"keyint={gop}:min-keyint={gop}:scenecut=0:log-level=error"
-        video = ["-preset", "ultrafast", "-x265-params", params]
+        codec_args = ["-preset", "ultrafast", "-x265-params", params]
     else:
-        video = ["-g", str(gop)]
-    logger.info("Encoding a %dx%d H.265 test clip with %s", width, height, encoder)
+        codec_args = ["-g", str(gop)]
+    logger.info(
+        "Encoding a %dx%d@%d H.265 test clip with %s", width, height, fps, encoder
+    )
     subprocess.run(  # noqa: S603 - our own arguments, no shell
         [
             *(ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y"),
             *("-f", "lavfi", "-i", f"testsrc2=size={width}x{height}:rate={fps}"),
             *("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"),
             *("-t", str(TEST_CLIP_SECONDS), "-map", "0:v", "-map", "1:a"),
-            *("-c:v", encoder, *video, "-pix_fmt", "yuv420p"),
+            *("-c:v", encoder, *codec_args, "-pix_fmt", "yuv420p"),
             *("-c:a", "aac", "-b:a", "64k", "-f", "mpegts", path),
         ],
         check=True,
@@ -197,17 +205,17 @@ class HKSVCamera(camera.Camera):
         # Each quality announced with its stream, best first.
         tiers = {
             quality: (
-                make_test_clip(args.ffmpeg, args.encoder, size, args.fps, self._tmp)
+                make_test_clip(args.ffmpeg, args.encoder, video, self._tmp)
                 if url == "test"
                 else input_args(url),
-                size,
+                video,
             )
-            for quality, (url, size) in sorted(args.streams.items())
+            for quality, (url, video) in sorted(args.streams.items())
         }
         sub = tiers[max(tiers)][0]
         self.snapshot_input = sub
-        sizes = {quality: size for quality, (_, size) in tiers.items()}
-        main_size = tiers[hksv3.VideoQuality.HIGH][1]
+        formats = {quality: video for quality, (_, video) in tiers.items()}
+        main_width, main_height, main_fps = formats[hksv3.VideoQuality.HIGH]
 
         # One worker loop and one pool: each channel is pulled once for all
         # local and remote sessions and the recording.
@@ -218,12 +226,17 @@ class HKSVCamera(camera.Camera):
             ffmpeg=args.ffmpeg,
             audio=not args.no_audio,
         )
-        width, height = tiers[min(tiers)][1]
-        average, _peak = bitrates(*main_size)
+        width, height, _ = formats[min(formats)]
+        average, _peak = bitrates(main_width, main_height)
         self.recording = RecordingMediaDelegate(
             self.sources,
             hksv3.VideoStreamTier(
-                0, hksv3.VideoQuality.HIGH, average, *main_size, args.fps
+                0,
+                hksv3.VideoQuality.HIGH,
+                average,
+                main_width,
+                main_height,
+                main_fps,
             ),
             prebuffer_ms=args.prebuffer,
         )
@@ -266,11 +279,12 @@ class HKSVCamera(camera.Camera):
                         hksv3.VideoStreamCapability(
                             uuid5(SENSOR_UUID, quality.name),
                             quality,
-                            *size,
-                            args.fps,
-                            *bitrates(*size),
+                            video_width,
+                            video_height,
+                            fps,
+                            *bitrates(video_width, video_height),
                         )
-                        for quality, size in sizes.items()
+                        for quality, (video_width, video_height, fps) in formats.items()
                     ],
                 )
             ],
@@ -348,10 +362,9 @@ def main() -> None:
             f"--{name}",
             type=parse_stream,
             default=os.environ.get(f"HKSV_{quality.name}"),
-            metavar="URL@WIDTHxHEIGHT",
+            metavar="URL@WIDTHxHEIGHT@FPS",
             help=f"H.265 stream of the {name} tier, 'test' as URL for a test picture",
         )
-    parser.add_argument("--fps", type=int, default=15)
     parser.add_argument(
         "--no-audio", action="store_true", help="the streams have no audio"
     )
